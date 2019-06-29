@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	envoyrouteapi "github.com/envoyproxy/go-control-plane/envoy/api/v2/route"
+	"github.com/gogo/protobuf/proto"
 	"github.com/solo-io/gloo/projects/gloo/pkg/upstreams"
 	skkube "github.com/solo-io/solo-kit/pkg/api/v1/resources/common/kubernetes"
 	k8scorev1 "k8s.io/api/core/v1"
@@ -36,13 +37,14 @@ import (
 
 var _ = Describe("Translator", func() {
 	var (
-		settings   *v1.Settings
-		translator Translator
-		upstream   *v1.Upstream
-		proxy      *v1.Proxy
-		params     plugins.Params
-		matcher    *v1.Matcher
-		routes     []*v1.Route
+		settings          *v1.Settings
+		translator        Translator
+		upstream          *v1.Upstream
+		proxy             *v1.Proxy
+		params            plugins.Params
+		registeredPlugins []plugins.Plugin
+		matcher           *v1.Matcher
+		routes            []*v1.Route
 
 		snapshot            envoycache.Snapshot
 		cluster             *envoyapi.Cluster
@@ -57,8 +59,7 @@ var _ = Describe("Translator", func() {
 		opts := bootstrap.Opts{
 			Settings: settings,
 		}
-		tplugins := registry.Plugins(opts)
-		translator = NewTranslator(tplugins, settings)
+		registeredPlugins = registry.Plugins(opts)
 
 		upname := core.Metadata{
 			Name:      "test",
@@ -109,6 +110,7 @@ var _ = Describe("Translator", func() {
 		}}
 	})
 	JustBeforeEach(func() {
+		translator = NewTranslator(registeredPlugins, settings)
 		proxy = &v1.Proxy{
 			Metadata: core.Metadata{
 				Name:      "test",
@@ -161,6 +163,25 @@ var _ = Describe("Translator", func() {
 		snapshot = snap
 	}
 
+	It("sanitizes an invalid virtual host name", func() {
+		proxyClone := proto.Clone(proxy).(*v1.Proxy)
+		proxyClone.GetListeners()[0].GetHttpListener().GetVirtualHosts()[0].Name = "invalid.name"
+
+		snap, errs, err := translator.Translate(params, proxyClone)
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(errs.Validate()).NotTo(HaveOccurred())
+		Expect(snap).NotTo(BeNil())
+
+		routes := snap.GetResources(xds.RouteType)
+		Expect(routes.Items).To(HaveKey("listener-routes"))
+		routeResource := routes.Items["listener-routes"]
+		route_configuration = routeResource.ResourceProto().(*envoyapi.RouteConfiguration)
+		Expect(route_configuration).NotTo(BeNil())
+		Expect(route_configuration.GetVirtualHosts()).To(HaveLen(1))
+		Expect(route_configuration.GetVirtualHosts()[0].Name).To(Equal("invalid_name"))
+	})
+
 	Context("service spec", func() {
 		It("changes in service spec should create a different snapshot", func() {
 			translate()
@@ -177,6 +198,7 @@ var _ = Describe("Translator", func() {
 			Expect(oldVersion).ToNot(Equal(newVersion))
 		})
 	})
+
 	Context("route header match", func() {
 		It("should translate header matcher with no value to a PresentMatch", func() {
 
@@ -647,8 +669,34 @@ var _ = Describe("Translator", func() {
 			Expect(ok).To(BeTrue())
 			Expect(clusterAction.Cluster).To(Equal(UpstreamToClusterName(fakeUsList[0].Metadata.Ref())))
 		})
+	})
+
+	Context("Route plugin", func() {
+		var (
+			routePlugin *routePluginMock
+		)
+		BeforeEach(func() {
+			routePlugin = &routePluginMock{}
+			registeredPlugins = append(registeredPlugins, routePlugin)
+		})
+
+		It("should have the virtual host when processing route", func() {
+			hasVhost := false
+			routePlugin.ProcessRouteFunc = func(params plugins.RouteParams, in *v1.Route, out *envoyrouteapi.Route) error {
+				if params.VirtualHost != nil {
+					if params.VirtualHost.GetName() == "virt1" {
+						hasVhost = true
+					}
+				}
+				return nil
+			}
+
+			translate()
+			Expect(hasVhost).To(BeTrue())
+		})
 
 	})
+
 })
 
 func sv(s string) *types.Value {
@@ -657,4 +705,16 @@ func sv(s string) *types.Value {
 			StringValue: s,
 		},
 	}
+}
+
+type routePluginMock struct {
+	ProcessRouteFunc func(params plugins.RouteParams, in *v1.Route, out *envoyrouteapi.Route) error
+}
+
+func (p *routePluginMock) Init(params plugins.InitParams) error {
+	return nil
+}
+
+func (p *routePluginMock) ProcessRoute(params plugins.RouteParams, in *v1.Route, out *envoyrouteapi.Route) error {
+	return p.ProcessRouteFunc(params, in, out)
 }
