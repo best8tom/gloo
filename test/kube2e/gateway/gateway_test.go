@@ -5,16 +5,26 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"time"
+
+	"github.com/solo-io/gloo/pkg/cliutil/install"
+
+	"github.com/solo-io/gloo/test/kube2e"
+	"github.com/solo-io/go-utils/testutils/exec"
+
+	"github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/transformation"
+
+	defaults2 "github.com/solo-io/gloo/projects/gloo/pkg/defaults"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/solo-io/solo-kit/pkg/api/external/kubernetes/service"
 	kubecache "github.com/solo-io/solo-kit/pkg/api/v1/clients/kube/cache"
 	skkube "github.com/solo-io/solo-kit/pkg/api/v1/resources/common/kubernetes"
 
-	"github.com/solo-io/gloo/projects/gateway/pkg/translator"
 	"github.com/solo-io/go-utils/errors"
 
-	"github.com/solo-io/gloo/pkg/utils"
 	"github.com/solo-io/gloo/projects/gloo/pkg/plugins/linkerd"
 	"github.com/solo-io/go-utils/testutils/helper"
 
@@ -22,7 +32,8 @@ import (
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	v1 "github.com/solo-io/gloo/projects/gateway/pkg/api/v1"
+	gatewayv1 "github.com/solo-io/gloo/projects/gateway/pkg/api/v1"
+	gatewayv2 "github.com/solo-io/gloo/projects/gateway/pkg/api/v2"
 	"github.com/solo-io/gloo/projects/gateway/pkg/defaults"
 	gloov1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1"
 	grpcv1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/grpc"
@@ -38,14 +49,14 @@ import (
 	"github.com/solo-io/solo-kit/pkg/api/v1/clients/kube"
 	"github.com/solo-io/solo-kit/pkg/api/v1/resources/core"
 	corev1 "k8s.io/api/core/v1"
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 )
 
 var _ = Describe("Kube2e: gateway", func() {
 
 	const (
-		gatewayProxy = "gateway-proxy"
+		gatewayProxy = defaults.GatewayProxyName
 		gatewayPort  = int(80)
 	)
 
@@ -56,8 +67,9 @@ var _ = Describe("Kube2e: gateway", func() {
 		cache      kube.SharedCache
 		kubeClient kubernetes.Interface
 
-		gatewayClient        v1.GatewayClient
-		virtualServiceClient v1.VirtualServiceClient
+		gatewayClient        gatewayv2.GatewayClient
+		virtualServiceClient gatewayv1.VirtualServiceClient
+		routeTableClient     gatewayv1.RouteTableClient
 		upstreamGroupClient  gloov1.UpstreamGroupClient
 		upstreamClient       gloov1.UpstreamClient
 		proxyClient          gloov1.ProxyClient
@@ -76,12 +88,17 @@ var _ = Describe("Kube2e: gateway", func() {
 
 		cache = kube.NewKubeCache(ctx)
 		gatewayClientFactory := &factory.KubeResourceClientFactory{
-			Crd:         v1.GatewayCrd,
+			Crd:         gatewayv2.GatewayCrd,
 			Cfg:         cfg,
 			SharedCache: cache,
 		}
 		virtualServiceClientFactory := &factory.KubeResourceClientFactory{
-			Crd:         v1.VirtualServiceCrd,
+			Crd:         gatewayv1.VirtualServiceCrd,
+			Cfg:         cfg,
+			SharedCache: cache,
+		}
+		routeTableClientFactory := &factory.KubeResourceClientFactory{
+			Crd:         gatewayv1.RouteTableCrd,
 			Cfg:         cfg,
 			SharedCache: cache,
 		}
@@ -101,14 +118,19 @@ var _ = Describe("Kube2e: gateway", func() {
 			SharedCache: cache,
 		}
 
-		gatewayClient, err = v1.NewGatewayClient(gatewayClientFactory)
+		gatewayClient, err = gatewayv2.NewGatewayClient(gatewayClientFactory)
 		Expect(err).NotTo(HaveOccurred())
 		err = gatewayClient.Register()
 		Expect(err).NotTo(HaveOccurred())
 
-		virtualServiceClient, err = v1.NewVirtualServiceClient(virtualServiceClientFactory)
+		virtualServiceClient, err = gatewayv1.NewVirtualServiceClient(virtualServiceClientFactory)
 		Expect(err).NotTo(HaveOccurred())
 		err = virtualServiceClient.Register()
+		Expect(err).NotTo(HaveOccurred())
+
+		routeTableClient, err = gatewayv1.NewRouteTableClient(routeTableClientFactory)
+		Expect(err).NotTo(HaveOccurred())
+		err = routeTableClient.Register()
 		Expect(err).NotTo(HaveOccurred())
 
 		upstreamGroupClient, err = gloov1.NewUpstreamGroupClient(upstreamGroupClientFactory)
@@ -148,12 +170,15 @@ var _ = Describe("Kube2e: gateway", func() {
 					},
 				},
 			}
-			_, err := virtualServiceClient.Write(getVirtualService(dest, nil), clients.WriteOpts{})
-			Expect(err).NotTo(HaveOccurred())
+			// give proxy validation a chance to start
+			Eventually(func() error {
+				_, err := virtualServiceClient.Write(getVirtualService(dest, nil), clients.WriteOpts{})
+				return err
+			}).ShouldNot(HaveOccurred())
 
 			defaultGateway := defaults.DefaultGateway(testHelper.InstallNamespace)
 			// wait for default gateway to be created
-			Eventually(func() (*v1.Gateway, error) {
+			Eventually(func() (*gatewayv2.Gateway, error) {
 				return gatewayClient.Read(testHelper.InstallNamespace, defaultGateway.Metadata.Name, clients.ReadOpts{})
 			}, "15s", "0.5s").Should(Not(BeNil()))
 
@@ -164,9 +189,9 @@ var _ = Describe("Kube2e: gateway", func() {
 				Host:              gatewayProxy,
 				Service:           gatewayProxy,
 				Port:              gatewayPort,
-				ConnectionTimeout: 10, // this is important, as sometimes curl hangs
+				ConnectionTimeout: 1, // this is important, as sometimes curl hangs
 				WithoutStats:      true,
-			}, helper.SimpleHttpResponse, 1, 60*time.Second)
+			}, helper.SimpleHttpResponse, 1, 60*time.Second, 1*time.Second)
 		})
 
 		Context("routing directly to kubernetes services", func() {
@@ -175,8 +200,8 @@ var _ = Describe("Kube2e: gateway", func() {
 
 				// Create virtual service routing directly to the testrunner service
 				dest := &gloov1.Destination{
-					DestinationType: &gloov1.Destination_Service{
-						Service: &gloov1.ServiceDestination{
+					DestinationType: &gloov1.Destination_Kube{
+						Kube: &gloov1.KubernetesServiceDestination{
 							Ref: core.ResourceRef{
 								Namespace: testHelper.InstallNamespace,
 								Name:      helper.TestrunnerName,
@@ -189,18 +214,18 @@ var _ = Describe("Kube2e: gateway", func() {
 				Expect(err).NotTo(HaveOccurred())
 			})
 
-			It("correctly routes to the service", func() {
+			It("correctly routes to the service (http)", func() {
 				defaultGateway := defaults.DefaultGateway(testHelper.InstallNamespace)
 
 				// wait for default gateway to be created
-				Eventually(func() *v1.Gateway {
+				Eventually(func() *gatewayv2.Gateway {
 					gw, _ := gatewayClient.Read(testHelper.InstallNamespace, defaultGateway.Metadata.Name, clients.ReadOpts{Ctx: ctx})
 					return gw
 				}, "15s", "0.5s").Should(Not(BeNil()))
 
 				// wait for the expected proxy configuration to be accepted
 				Eventually(func() error {
-					proxy, err := proxyClient.Read(testHelper.InstallNamespace, translator.GatewayProxyName, clients.ReadOpts{Ctx: ctx})
+					proxy, err := proxyClient.Read(testHelper.InstallNamespace, defaults.GatewayProxyName, clients.ReadOpts{Ctx: ctx})
 					if err != nil {
 						return err
 					}
@@ -214,7 +239,7 @@ var _ = Describe("Kube2e: gateway", func() {
 							for _, r := range vh.Routes {
 								if action := r.GetRouteAction(); action != nil {
 									if single := action.GetSingle(); single != nil {
-										if svcDest := single.GetService(); svcDest != nil {
+										if svcDest := single.GetKube(); svcDest != nil {
 											if svcDest.Ref.Name == helper.TestrunnerName &&
 												svcDest.Ref.Namespace == testHelper.InstallNamespace &&
 												svcDest.Port == uint32(helper.TestRunnerPort) {
@@ -237,10 +262,11 @@ var _ = Describe("Kube2e: gateway", func() {
 					Host:              gatewayProxy,
 					Service:           gatewayProxy,
 					Port:              gatewayPort,
-					ConnectionTimeout: 10, // this is important, as sometimes curl hangs
+					ConnectionTimeout: 1, // this is important, as sometimes curl hangs
 					WithoutStats:      true,
-				}, helper.SimpleHttpResponse, 1, 60*time.Second)
+				}, helper.SimpleHttpResponse, 1, 60*time.Second, 1*time.Second)
 			})
+
 		})
 
 		Context("native ssl", func() {
@@ -276,17 +302,22 @@ var _ = Describe("Kube2e: gateway", func() {
 						},
 					},
 				}
+				vs := getVirtualService(dest, sslConfig)
 
-				_, err = virtualServiceClient.Write(getVirtualService(dest, sslConfig), clients.WriteOpts{})
+				// give Gloo a chance to pick up the secret
+				// required to allow validation to pass
+				Eventually(func() error {
+					_, err = virtualServiceClient.Write(vs, clients.WriteOpts{})
+					return err
+				}, time.Second*5, time.Second).ShouldNot(HaveOccurred())
 				Expect(err).NotTo(HaveOccurred())
 
 				defaultGateway := defaults.DefaultGateway(testHelper.InstallNamespace)
 				// wait for default gateway to be created
-				Eventually(func() (*v1.Gateway, error) {
+				Eventually(func() (*gatewayv2.Gateway, error) {
 					return gatewayClient.Read(testHelper.InstallNamespace, defaultGateway.Metadata.Name, clients.ReadOpts{})
 				}, "15s", "0.5s").Should(Not(BeNil()))
 
-				gatewayProxy := "gateway-proxy"
 				gatewayPort := int(443)
 				caFile := ToFile(helpers.Certificate())
 				//noinspection GoUnhandledErrorResult
@@ -299,13 +330,13 @@ var _ = Describe("Kube2e: gateway", func() {
 					Protocol:          "https",
 					Path:              "/",
 					Method:            "GET",
-					Host:              gatewayProxy,
-					Service:           gatewayProxy,
+					Host:              defaults.GatewayProxyName,
+					Service:           defaults.GatewayProxyName,
 					Port:              gatewayPort,
 					CaFile:            "/tmp/ca.crt",
-					ConnectionTimeout: 10,
+					ConnectionTimeout: 1,
 					WithoutStats:      true,
-				}, helper.SimpleHttpResponse, 1, 60*time.Second)
+				}, helper.SimpleHttpResponse, 1, 60*time.Second, 1*time.Second)
 			})
 		})
 
@@ -365,19 +396,29 @@ var _ = Describe("Kube2e: gateway", func() {
 			})
 
 			It("appends linkerd headers when linkerd is enabled", func() {
-				upstreams, err := upstreamClient.List(testHelper.InstallNamespace, clients.ListOpts{})
-				Expect(err).NotTo(HaveOccurred())
 				upstreamName := fmt.Sprintf("%s-%s-%v", testHelper.InstallNamespace, helper.HttpEchoName, helper.HttpEchoPort)
-				us, err := upstreams.Find(testHelper.InstallNamespace, upstreamName)
-				Expect(err).NotTo(HaveOccurred())
+				var ref core.ResourceRef
+				//give discovery time to write the upstream
+				Eventually(func() error {
+					upstreams, err := upstreamClient.List(testHelper.InstallNamespace, clients.ListOpts{})
+					if err != nil {
+						return err
+					}
+					us, err := upstreams.Find(testHelper.InstallNamespace, upstreamName)
+					if err != nil {
+						return err
+					}
+					ref = us.Metadata.Ref()
+					return nil
+				}, time.Second*10, time.Second).ShouldNot(HaveOccurred())
 
 				dest := &gloov1.Destination{
 					DestinationType: &gloov1.Destination_Upstream{
-						Upstream: utils.ResourceRefPtr(us.Metadata.Ref()),
+						Upstream: &ref,
 					},
 				}
 
-				_, err = virtualServiceClient.Write(getVirtualService(dest, nil), clients.WriteOpts{})
+				_, err := virtualServiceClient.Write(getVirtualService(dest, nil), clients.WriteOpts{})
 				Expect(err).NotTo(HaveOccurred())
 
 				responseString := fmt.Sprintf(`"%s":"%s.%s.svc.cluster.local:%v"`,
@@ -389,10 +430,63 @@ var _ = Describe("Kube2e: gateway", func() {
 					Host:              gatewayProxy,
 					Service:           gatewayProxy,
 					Port:              gatewayPort,
-					ConnectionTimeout: 10,
+					ConnectionTimeout: 1,
 					WithoutStats:      true,
-				}, responseString, 1, 60*time.Second)
+				}, responseString, 1, 60*time.Second, 1*time.Second)
 			})
+		})
+	})
+
+	Context("tests with route tables", func() {
+
+		AfterEach(func() {
+			cancel()
+			err := virtualServiceClient.Delete(testHelper.InstallNamespace, "vs", clients.DeleteOpts{})
+			Expect(err).NotTo(HaveOccurred())
+			err = routeTableClient.Delete(testHelper.InstallNamespace, "rt1", clients.DeleteOpts{})
+			Expect(err).NotTo(HaveOccurred())
+			err = routeTableClient.Delete(testHelper.InstallNamespace, "rt2", clients.DeleteOpts{})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("correctly routes requests to an upstream", func() {
+			dest := &gloov1.Destination{
+				DestinationType: &gloov1.Destination_Upstream{
+					Upstream: &core.ResourceRef{
+						Namespace: testHelper.InstallNamespace,
+						Name:      fmt.Sprintf("%s-%s-%v", testHelper.InstallNamespace, helper.TestrunnerName, helper.TestRunnerPort),
+					},
+				},
+			}
+
+			rt2 := getRouteTable("rt2", getRouteWithDest(dest, "/root/rt1/rt2"))
+			rt1 := getRouteTable("rt1", getRouteWithDelegate(rt2.Metadata.Name, "/root/rt1"))
+			vs := getVirtualServiceWithRoute(addPrefixRewrite(getRouteWithDelegate(rt1.Metadata.Name, "/root"), "/"), nil)
+
+			_, err := routeTableClient.Write(rt1, clients.WriteOpts{})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = routeTableClient.Write(rt2, clients.WriteOpts{})
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = virtualServiceClient.Write(vs, clients.WriteOpts{})
+			Expect(err).NotTo(HaveOccurred())
+
+			defaultGateway := defaults.DefaultGateway(testHelper.InstallNamespace)
+			// wait for default gateway to be created
+			Eventually(func() (*gatewayv2.Gateway, error) {
+				return gatewayClient.Read(testHelper.InstallNamespace, defaultGateway.Metadata.Name, clients.ReadOpts{})
+			}, "15s", "0.5s").Should(Not(BeNil()))
+
+			testHelper.CurlEventuallyShouldRespond(helper.CurlOpts{
+				Protocol:          "http",
+				Path:              "/root/rt1/rt2",
+				Method:            "GET",
+				Host:              gatewayProxy,
+				Service:           gatewayProxy,
+				Port:              gatewayPort,
+				ConnectionTimeout: 1, // this is important, as sometimes curl hangs
+				WithoutStats:      true,
+			}, helper.SimpleHttpResponse, 1, 60*time.Second, 1*time.Second)
 		})
 	})
 
@@ -404,7 +498,7 @@ var _ = Describe("Kube2e: gateway", func() {
 			// create some services
 			for i := 0; i < 20; i++ {
 				service := &corev1.Service{
-					ObjectMeta: meta_v1.ObjectMeta{
+					ObjectMeta: metav1.ObjectMeta{
 						Name:   fmt.Sprintf("%s-%d", displayName, i),
 						Labels: map[string]string{"gloo": displayName},
 					},
@@ -423,7 +517,7 @@ var _ = Describe("Kube2e: gateway", func() {
 
 		AfterEach(func() {
 			for _, svcName := range createdServices {
-				_ = kubeClient.CoreV1().Services(testHelper.InstallNamespace).Delete(svcName, &meta_v1.DeleteOptions{})
+				_ = kubeClient.CoreV1().Services(testHelper.InstallNamespace).Delete(svcName, &metav1.DeleteOptions{})
 			}
 		})
 
@@ -438,13 +532,16 @@ var _ = Describe("Kube2e: gateway", func() {
 				Eventually(func() (*gloov1.Upstream, error) { return getUpstream(svc) }, "15s", "0.5s").ShouldNot(BeNil())
 				// now set subset config on an upstream:
 				Eventually(func() error {
-					upstream, _ := getUpstream(svc)
+					upstream, err := getUpstream(svc)
+					if err != nil {
+						return err
+					}
 					upstream.UpstreamSpec.UpstreamType.(*gloov1.UpstreamSpec_Kube).Kube.ServiceSpec = &gloov1plugins.ServiceSpec{
 						PluginType: &gloov1plugins.ServiceSpec_Grpc{
 							Grpc: &grpcv1.ServiceSpec{},
 						},
 					}
-					_, err := upstreamClient.Write(upstream, clients.WriteOpts{OverwriteExisting: true})
+					_, err = upstreamClient.Write(upstream, clients.WriteOpts{OverwriteExisting: true})
 					return err
 				}, "1s", "0.1s").ShouldNot(HaveOccurred())
 			}
@@ -456,28 +553,162 @@ var _ = Describe("Kube2e: gateway", func() {
 			for _, svc := range createdServices {
 				// now set subset config on an upstream:
 				up, _ := getUpstream(svc)
-				spec := up.UpstreamSpec.UpstreamType.(*gloov1.UpstreamSpec_Kube).Kube.ServiceSpec
+				spec := up.GetUpstreamSpec().GetKube().GetServiceSpec()
 				Expect(spec).ToNot(BeNil())
 				Expect(spec.GetGrpc()).ToNot(BeNil())
 			}
 		})
 	})
 
+	Context("tcp", func() {
+
+		var (
+			defaultGateway *gatewayv2.Gateway
+			tcpEcho        helper.TestRunner
+
+			tcpPort = corev1.ServicePort{
+				Name:       "tcp-proxy",
+				Port:       int32(defaults2.TcpPort),
+				TargetPort: intstr.FromInt(int(defaults2.TcpPort)),
+				Protocol:   "TCP",
+			}
+		)
+
+		BeforeEach(func() {
+			var err error
+
+			tcpEcho, err = helper.NewEchoTcp(testHelper.InstallNamespace)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tcpEcho.Deploy(time.Minute)).NotTo(HaveOccurred())
+			defaultGateway = defaults.DefaultTcpGateway(testHelper.InstallNamespace)
+			dest := &gloov1.Destination{
+				DestinationType: &gloov1.Destination_Kube{
+					Kube: &gloov1.KubernetesServiceDestination{
+						Ref: core.ResourceRef{
+							Namespace: testHelper.InstallNamespace,
+							Name:      helper.TcpEchoName,
+						},
+						Port: uint32(helper.TcpEchoPort),
+					},
+				},
+			}
+			tcpGateway := defaultGateway.GetTcpGateway()
+			Expect(tcpGateway).NotTo(BeNil())
+			tcpGateway.Destinations = append(tcpGateway.Destinations, &gloov1.TcpHost{
+				Name: "one",
+				Destination: &gloov1.RouteAction{
+					Destination: &gloov1.RouteAction_Single{
+						Single: dest,
+					},
+				},
+			})
+			_, err = gatewayClient.Write(defaultGateway, clients.WriteOpts{})
+			Expect(err).NotTo(HaveOccurred())
+			gwSvc, err := kubeClient.CoreV1().Services(testHelper.InstallNamespace).Get(gatewayProxy, metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			found := false
+			for _, v := range gwSvc.Spec.Ports {
+				if v.Name == tcpPort.Name || v.Port == tcpPort.Port {
+					found = true
+					break
+				}
+			}
+			if !found {
+				gwSvc.Spec.Ports = append(gwSvc.Spec.Ports, tcpPort)
+			}
+			_, err = kubeClient.CoreV1().Services(testHelper.InstallNamespace).Update(gwSvc)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		AfterEach(func() {
+			Expect(gatewayClient.Delete(testHelper.InstallNamespace, defaultGateway.Metadata.Name, clients.DeleteOpts{})).NotTo(HaveOccurred())
+			gwSvc, err := kubeClient.CoreV1().Services(testHelper.InstallNamespace).Get(gatewayProxy, metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			ports := make([]corev1.ServicePort, 0, len(gwSvc.Spec.Ports))
+			for _, v := range gwSvc.Spec.Ports {
+				if v.Name != tcpPort.Name {
+					ports = append(ports, v)
+				}
+			}
+			gwSvc.Spec.Ports = ports
+			_, err = kubeClient.CoreV1().Services(testHelper.InstallNamespace).Update(gwSvc)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tcpEcho.Terminate()).NotTo(HaveOccurred())
+		})
+
+		It("correctly routes to the service (tcp)", func() {
+
+			// wait for default gateway to be created
+			Eventually(func() *gatewayv2.Gateway {
+				gw, _ := gatewayClient.Read(testHelper.InstallNamespace, defaultGateway.Metadata.Name, clients.ReadOpts{Ctx: ctx})
+				return gw
+			}, "15s", "0.5s").Should(Not(BeNil()))
+
+			// wait for the expected proxy configuration to be accepted
+			Eventually(func() error {
+				proxy, err := proxyClient.Read(testHelper.InstallNamespace, defaults.GatewayProxyName, clients.ReadOpts{Ctx: ctx})
+				if err != nil {
+					return err
+				}
+
+				if status := proxy.Status; status.State != core.Status_Accepted {
+					return errors.Errorf("unexpected proxy state: %v. Reason: %v", status.State, status.Reason)
+				}
+
+				for _, l := range proxy.Listeners {
+					tcpListener := l.GetTcpListener()
+					if tcpListener == nil {
+						continue
+					}
+					for _, tcph := range tcpListener.TcpHosts {
+						if action := tcph.GetDestination(); action != nil {
+							if single := action.GetSingle(); single != nil {
+								if svcDest := single.GetKube(); svcDest != nil {
+									if svcDest.Ref.Name == helper.TcpEchoName &&
+										svcDest.Ref.Namespace == testHelper.InstallNamespace &&
+										svcDest.Port == uint32(helper.TcpEchoPort) {
+										return nil
+									}
+								}
+							}
+						}
+					}
+				}
+
+				return errors.Errorf("proxy did not contain expected route")
+			}, "15s", "0.5s").Should(BeNil())
+
+			responseString := fmt.Sprintf("Connected to %s",
+				gatewayProxy)
+
+			tcpEcho.CurlEventuallyShouldOutput(helper.CurlOpts{
+				Protocol:          "telnet",
+				Service:           gatewayProxy,
+				Port:              int(defaultGateway.BindPort),
+				ConnectionTimeout: 10,
+				Verbose:           true,
+			}, responseString, 1, 30*time.Second)
+		})
+	})
+
 	Context("with subsets and upstream groups", func() {
 
 		var (
-			redpod   *corev1.Pod
-			bluepod  *corev1.Pod
-			greenpod *corev1.Pod
+			redPod   *corev1.Pod
+			bluePod  *corev1.Pod
+			greenPod *corev1.Pod
 			service  *corev1.Service
+			vs       *gatewayv1.VirtualService
+			ug       *gloov1.UpstreamGroup
 		)
 		BeforeEach(func() {
 			pod := &corev1.Pod{
-				ObjectMeta: meta_v1.ObjectMeta{
+				ObjectMeta: metav1.ObjectMeta{
 					GenerateName: "pod",
 					Labels:       map[string]string{"app": "redblue", "text": "red"},
 				},
 				Spec: corev1.PodSpec{
+					TerminationGracePeriodSeconds: pointerToInt64(0),
 					Containers: []corev1.Container{{
 						Name:  "echo",
 						Image: "hashicorp/http-echo@sha256:ba27d460cd1f22a1a4331bdf74f4fccbc025552357e8a3249c40ae216275de96",
@@ -485,22 +716,22 @@ var _ = Describe("Kube2e: gateway", func() {
 					}},
 				}}
 			var err error
-			redpod, err = kubeClient.CoreV1().Pods(testHelper.InstallNamespace).Create(pod)
+			redPod, err = kubeClient.CoreV1().Pods(testHelper.InstallNamespace).Create(pod)
 			Expect(err).NotTo(HaveOccurred())
 
 			pod.Labels["text"] = "blue"
 			pod.Spec.Containers[0].Args = []string{"-text=\"blue-pod\""}
-			bluepod, err = kubeClient.CoreV1().Pods(testHelper.InstallNamespace).Create(pod)
+			bluePod, err = kubeClient.CoreV1().Pods(testHelper.InstallNamespace).Create(pod)
 			Expect(err).NotTo(HaveOccurred())
 
 			// green pod - no label
 			delete(pod.Labels, "text")
 			pod.Spec.Containers[0].Args = []string{"-text=\"green-pod\""}
-			greenpod, err = kubeClient.CoreV1().Pods(testHelper.InstallNamespace).Create(pod)
+			greenPod, err = kubeClient.CoreV1().Pods(testHelper.InstallNamespace).Create(pod)
 			Expect(err).NotTo(HaveOccurred())
 
 			service = &corev1.Service{
-				ObjectMeta: meta_v1.ObjectMeta{
+				ObjectMeta: metav1.ObjectMeta{
 					GenerateName: "redblue",
 					Labels:       map[string]string{"app": "redblue"},
 				},
@@ -516,23 +747,58 @@ var _ = Describe("Kube2e: gateway", func() {
 		})
 
 		AfterEach(func() {
-			if redpod != nil {
-				_ = kubeClient.CoreV1().Pods(testHelper.InstallNamespace).Delete(redpod.Name, &meta_v1.DeleteOptions{})
+			if redPod != nil {
+				err := kubeClient.CoreV1().Pods(testHelper.InstallNamespace).Delete(redPod.Name, &metav1.DeleteOptions{GracePeriodSeconds: pointerToInt64(0)})
+				Expect(err).NotTo(HaveOccurred())
 			}
-			if bluepod != nil {
-				_ = kubeClient.CoreV1().Pods(testHelper.InstallNamespace).Delete(bluepod.Name, &meta_v1.DeleteOptions{})
+			if bluePod != nil {
+				err := kubeClient.CoreV1().Pods(testHelper.InstallNamespace).Delete(bluePod.Name, &metav1.DeleteOptions{GracePeriodSeconds: pointerToInt64(0)})
+				Expect(err).NotTo(HaveOccurred())
 			}
-			if greenpod != nil {
-				_ = kubeClient.CoreV1().Pods(testHelper.InstallNamespace).Delete(greenpod.Name, &meta_v1.DeleteOptions{})
+			if greenPod != nil {
+				err := kubeClient.CoreV1().Pods(testHelper.InstallNamespace).Delete(greenPod.Name, &metav1.DeleteOptions{GracePeriodSeconds: pointerToInt64(0)})
+				Expect(err).NotTo(HaveOccurred())
 			}
 			if service != nil {
-				_ = kubeClient.CoreV1().Services(testHelper.InstallNamespace).Delete(service.Name, &meta_v1.DeleteOptions{})
+				err := kubeClient.CoreV1().Services(testHelper.InstallNamespace).Delete(service.Name, &metav1.DeleteOptions{GracePeriodSeconds: pointerToInt64(0)})
+				Expect(err).NotTo(HaveOccurred())
 			}
-			_ = virtualServiceClient.Delete(testHelper.InstallNamespace, "vs", clients.DeleteOpts{})
+
+			if vs != nil {
+				err := virtualServiceClient.Delete(testHelper.InstallNamespace, vs.Metadata.Name, clients.DeleteOpts{IgnoreNotExist: true})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			if ug != nil {
+				err := upstreamGroupClient.Delete(testHelper.InstallNamespace, ug.Metadata.Name, clients.DeleteOpts{IgnoreNotExist: true})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			Eventually(func() error {
+				coloredPods, err := kubeClient.CoreV1().Pods(testHelper.InstallNamespace).List(
+					metav1.ListOptions{LabelSelector: labels.SelectorFromSet(map[string]string{"app": "redblue"}).String()})
+				if err != nil {
+					return err
+				}
+				vsList, err := virtualServiceClient.List(vs.GetMetadata().Namespace, clients.ListOpts{Ctx: ctx})
+				if err != nil {
+					return err
+				}
+				// After we remove the virtual service, the proxy should be removed as well by the gateway controller
+				proxyList, err := proxyClient.List(testHelper.InstallNamespace, clients.ListOpts{Ctx: ctx})
+				if err != nil {
+					return err
+				}
+
+				if len(coloredPods.Items)+len(vsList)+len(proxyList) == 0 {
+					return nil
+				}
+				return errors.Errorf("expected all test resources to have been deleted but found: "+
+					"%d pods, %d virtual services, %d proxies", len(coloredPods.Items), len(vsList), len(proxyList))
+			}, time.Minute, time.Second).Should(BeNil())
 		})
 
 		It("routes to subsets and upstream groups", func() {
-
 			getUpstream := func() (*gloov1.Upstream, error) {
 				name := testHelper.InstallNamespace + "-" + service.Name + "-5678"
 				return upstreamClient.Read(testHelper.InstallNamespace, name, clients.ReadOpts{})
@@ -556,7 +822,7 @@ var _ = Describe("Kube2e: gateway", func() {
 			}, "1s", "0.1s").ShouldNot(HaveOccurred())
 
 			// add subsets to upstream
-			ug := &gloov1.UpstreamGroup{
+			ug = &gloov1.UpstreamGroup{
 				Metadata: core.Metadata{
 					Name:      "test",
 					Namespace: testHelper.InstallNamespace,
@@ -606,23 +872,21 @@ var _ = Describe("Kube2e: gateway", func() {
 			// create an upstream group
 			// add subset to the upstream
 			// create another pod
-			_, err = virtualServiceClient.Write(&v1.VirtualService{
-
+			vs, err = virtualServiceClient.Write(&gatewayv1.VirtualService{
 				Metadata: core.Metadata{
 					Name:      "vs",
 					Namespace: testHelper.InstallNamespace,
 				},
-				VirtualHost: &gloov1.VirtualHost{
-					Name:    "default",
+				VirtualHost: &gatewayv1.VirtualHost{
 					Domains: []string{"*"},
-					Routes: []*gloov1.Route{
+					Routes: []*gatewayv1.Route{
 						{
 							Matcher: &gloov1.Matcher{
 								PathSpecifier: &gloov1.Matcher_Prefix{
 									Prefix: "/red",
 								},
 							},
-							Action: &gloov1.Route_RouteAction{
+							Action: &gatewayv1.Route_RouteAction{
 								RouteAction: &gloov1.RouteAction{
 									Destination: &gloov1.RouteAction_Single{
 										Single: &gloov1.Destination{
@@ -642,7 +906,7 @@ var _ = Describe("Kube2e: gateway", func() {
 									Prefix: "/",
 								},
 							},
-							Action: &gloov1.Route_RouteAction{
+							Action: &gatewayv1.Route_RouteAction{
 								RouteAction: &gloov1.RouteAction{
 									Destination: &gloov1.RouteAction_UpstreamGroup{
 										UpstreamGroup: &ugref,
@@ -658,7 +922,7 @@ var _ = Describe("Kube2e: gateway", func() {
 
 			defaultGateway := defaults.DefaultGateway(testHelper.InstallNamespace)
 			// wait for default gateway to be created
-			Eventually(func() (*v1.Gateway, error) {
+			Eventually(func() (*gatewayv2.Gateway, error) {
 				return gatewayClient.Read(testHelper.InstallNamespace, defaultGateway.Metadata.Name, clients.ReadOpts{})
 			}, "15s", "0.5s").Should(Not(BeNil()))
 
@@ -674,9 +938,9 @@ var _ = Describe("Kube2e: gateway", func() {
 				Host:              gatewayProxy,
 				Service:           gatewayProxy,
 				Port:              gatewayPort,
-				ConnectionTimeout: 10,
+				ConnectionTimeout: 1,
 				WithoutStats:      true,
-			}, "red-pod", 1, 120*time.Second)
+			}, "red-pod", 1, 120*time.Second, 1*time.Second)
 
 			testHelper.CurlEventuallyShouldRespond(helper.CurlOpts{
 				Protocol:          "http",
@@ -685,9 +949,9 @@ var _ = Describe("Kube2e: gateway", func() {
 				Host:              gatewayProxy,
 				Service:           gatewayProxy,
 				Port:              gatewayPort,
-				ConnectionTimeout: 10,
+				ConnectionTimeout: 1,
 				WithoutStats:      true,
-			}, "blue-pod", 1, 120*time.Second)
+			}, "blue-pod", 1, 120*time.Second, 1*time.Second)
 
 			testHelper.CurlEventuallyShouldRespond(helper.CurlOpts{
 				Protocol:          "http",
@@ -696,9 +960,9 @@ var _ = Describe("Kube2e: gateway", func() {
 				Host:              gatewayProxy,
 				Service:           gatewayProxy,
 				Port:              gatewayPort,
-				ConnectionTimeout: 10,
+				ConnectionTimeout: 1,
 				WithoutStats:      true,
-			}, "green-pod", 1, 120*time.Second)
+			}, "green-pod", 1, 120*time.Second, 1*time.Second)
 
 			redOpts := helper.CurlOpts{
 				Protocol:          "http",
@@ -707,7 +971,7 @@ var _ = Describe("Kube2e: gateway", func() {
 				Host:              gatewayProxy,
 				Service:           gatewayProxy,
 				Port:              gatewayPort,
-				ConnectionTimeout: 10,
+				ConnectionTimeout: 1,
 				WithoutStats:      true,
 			}
 
@@ -718,6 +982,116 @@ var _ = Describe("Kube2e: gateway", func() {
 				Expect(res).To(ContainSubstring("red-pod"))
 			}
 		})
+	})
+
+	Context("tests for the validation server", func() {
+		testValidation := func(yam, expectedErr string) {
+			out, err := install.KubectlApplyOut([]byte(yam))
+			if expectedErr == "" {
+				ExpectWithOffset(1, err).NotTo(HaveOccurred())
+				return
+			}
+			ExpectWithOffset(1, err).To(HaveOccurred())
+			ExpectWithOffset(1, string(out)).To(ContainSubstring(expectedErr))
+		}
+
+		It("rejects bad resources", func() {
+			// specifically avoiding using a DescribeTable here in order to avoid reinstalling
+			// for every test case
+			type testCase struct {
+				resourceYaml, expectedErr string
+			}
+
+			for _, tc := range []testCase{
+				{
+					resourceYaml: `
+apiVersion: gateway.solo.io/v1
+kind: VirtualService
+metadata:
+  name: default
+  namespace: ` + testHelper.InstallNamespace + `
+spec:
+  virtualHoost: {}
+`,
+					expectedErr: `could not unmarshal raw object: parsing resource from crd spec default in namespace ` + testHelper.InstallNamespace + ` into *v1.VirtualService: unknown field "virtualHoost" in v1.VirtualService`,
+				},
+				{
+					resourceYaml: `
+apiVersion: gateway.solo.io/v1
+kind: VirtualService
+metadata:
+  name: missing-upstream
+  namespace: ` + testHelper.InstallNamespace + `
+spec:
+  virtualHost:
+    routes:
+      - matcher:
+          methods:
+            - GET
+          prefix: /items/
+        routeAction:
+          single:
+            upstream:
+              name: does-not-exist
+              namespace: anywhere
+`,
+					expectedErr: "", // should not fail
+				},
+				{
+					resourceYaml: `
+apiVersion: gateway.solo.io/v1
+kind: VirtualService
+metadata:
+  name: method-matcher
+  namespace: ` + testHelper.InstallNamespace + `
+spec:
+  virtualHost:
+    routes:
+      - matcher:
+          methods:
+            - GET # not allowed
+          prefix: /delegated-prefix
+        delegateAction:
+          name: does-not-exist # also not allowed, but caught later
+          namespace: anywhere
+`,
+					expectedErr: "routes with delegate actions cannot use method matchers", // should not fail
+				},
+			} {
+				testValidation(tc.resourceYaml, tc.expectedErr)
+			}
+		})
+	})
+
+	// This has to run as last test in this suite, as it uninstalls Gloo!
+	It("removes all pods when uninstalled", func() {
+		kubeInterface := kube2e.MustKubeClient().CoreV1()
+		installedPods, err := kubeInterface.Pods(testHelper.InstallNamespace).List(metav1.ListOptions{})
+		Expect(err).NotTo(HaveOccurred(), "Should be able to read pods in the namespace")
+		Expect(installedPods.Items).NotTo(BeEmpty(), "Should have a nonzero number of pods in the namespace")
+
+		cmdArgs := []string{
+			filepath.Join(testHelper.BuildAssetDir, testHelper.GlooctlExecName), "uninstall", "-n", testHelper.InstallNamespace,
+		}
+
+		err = exec.RunCommand(testHelper.RootDir, true, cmdArgs...)
+		Expect(err).NotTo(HaveOccurred(), "The uninstall should be clean")
+
+		Eventually(func() ([]corev1.Pod, error) {
+			pods, err := kubeInterface.Pods(testHelper.InstallNamespace).List(metav1.ListOptions{})
+			if err != nil {
+				return nil, err
+			}
+
+			var runningPods []corev1.Pod
+			for _, pod := range pods.Items {
+				// the test runner itself is a pod in the namespace- we don't expect that one to be deleted
+				if pod.ObjectMeta.Name != "testrunner" {
+					runningPods = append(runningPods, pod)
+				}
+			}
+			return runningPods, nil
+		}, time.Minute, time.Second).Should(BeEmpty(), "There should be no pods remaining after running glooctl uninstall")
 	})
 })
 
@@ -731,31 +1105,69 @@ func ToFile(content string) string {
 	return f.Name()
 }
 
-func getVirtualService(dest *gloov1.Destination, sslConfig *gloov1.SslConfig) *v1.VirtualService {
-	return &v1.VirtualService{
+func getVirtualService(dest *gloov1.Destination, sslConfig *gloov1.SslConfig) *gatewayv1.VirtualService {
+	return getVirtualServiceWithRoute(getRouteWithDest(dest, "/"), sslConfig)
+}
+
+func getVirtualServiceWithRoute(route *gatewayv1.Route, sslConfig *gloov1.SslConfig) *gatewayv1.VirtualService {
+	return &gatewayv1.VirtualService{
 		Metadata: core.Metadata{
 			Name:      "vs",
 			Namespace: testHelper.InstallNamespace,
 		},
 		SslConfig: sslConfig,
-		VirtualHost: &gloov1.VirtualHost{
-			Name:    "default",
+		VirtualHost: &gatewayv1.VirtualHost{
 			Domains: []string{"*"},
 
-			Routes: []*gloov1.Route{{
-				Matcher: &gloov1.Matcher{
-					PathSpecifier: &gloov1.Matcher_Prefix{
-						Prefix: "/",
-					},
-				},
-				Action: &gloov1.Route_RouteAction{
-					RouteAction: &gloov1.RouteAction{
-						Destination: &gloov1.RouteAction_Single{
-							Single: dest,
-						},
-					},
-				},
-			}},
+			Routes: []*gatewayv1.Route{route},
 		},
 	}
+}
+
+func getRouteTable(name string, route *gatewayv1.Route) *gatewayv1.RouteTable {
+	return &gatewayv1.RouteTable{
+		Metadata: core.Metadata{
+			Name:      name,
+			Namespace: testHelper.InstallNamespace,
+		},
+		Routes: []*gatewayv1.Route{route},
+	}
+}
+
+func getRouteWithDest(dest *gloov1.Destination, path string) *gatewayv1.Route {
+	return &gatewayv1.Route{
+		Matcher: &gloov1.Matcher{
+			PathSpecifier: &gloov1.Matcher_Prefix{
+				Prefix: path,
+			},
+		},
+		Action: &gatewayv1.Route_RouteAction{
+			RouteAction: &gloov1.RouteAction{
+				Destination: &gloov1.RouteAction_Single{
+					Single: dest,
+				},
+			},
+		},
+	}
+}
+
+func getRouteWithDelegate(delegate string, path string) *gatewayv1.Route {
+	return &gatewayv1.Route{
+		Matcher: &gloov1.Matcher{
+			PathSpecifier: &gloov1.Matcher_Prefix{
+				Prefix: path,
+			},
+		},
+		Action: &gatewayv1.Route_DelegateAction{
+			DelegateAction: &core.ResourceRef{
+				Namespace: testHelper.InstallNamespace,
+				Name:      delegate,
+			},
+		},
+	}
+}
+
+func addPrefixRewrite(route *gatewayv1.Route, rewrite string) *gatewayv1.Route {
+	route.RoutePlugins = &gloov1.RoutePlugins{PrefixRewrite: &transformation.PrefixRewrite{PrefixRewrite: rewrite}}
+	return route
 }

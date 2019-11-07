@@ -3,6 +3,7 @@ package gloo.solo.io;
 option go_package = "github.com/solo-io/gloo/projects/gloo/pkg/api/v1";
 
 import "google/protobuf/wrappers.proto";
+import "google/protobuf/struct.proto";
 
 import "gogoproto/gogo.proto";
 option (gogoproto.equal_all) = true;
@@ -10,14 +11,13 @@ option (gogoproto.equal_all) = true;
 import "github.com/solo-io/solo-kit/api/v1/metadata.proto";
 import "github.com/solo-io/solo-kit/api/v1/status.proto";
 import "github.com/solo-io/solo-kit/api/v1/ref.proto";
+import "github.com/solo-io/solo-kit/api/v1/solo-kit.proto";
 
 import "github.com/solo-io/gloo/projects/gloo/api/v1/ssl.proto";
 import "github.com/solo-io/gloo/projects/gloo/api/v1/subset.proto";
 import "github.com/solo-io/gloo/projects/gloo/api/v1/plugins.proto";
-/*
-@solo-kit:resource.short_name=px
-@solo-kit:resource.plural_name=proxies
 
+/*
 A Proxy is a container for the entire set of configuration that will to be applied to one or more Proxy instances.
 Proxies can be understood as a set of listeners, represents a different bind address/port where the proxy will listen
 for connections. Each listener has its own set of configuration.
@@ -31,6 +31,9 @@ a proxy-specific identifier.
 * Node ID can be specified in Envoy with the `--service-node` flag, or in the Envoy instance's bootstrap config.
 */
 message Proxy {
+
+    option (core.solo.io.resource).short_name = "px";
+    option (core.solo.io.resource).plural_name = "proxies";
     // Define here each listener the proxy should create.
     // Listeners define the a set of behaviors for a single bind address/port where the proxy will listen
     // If no listeners are specified, the instances configured with the proxy resource will not accept connections.
@@ -62,18 +65,46 @@ message Listener {
     // Listeners can listen for HTTP, TCP (unsupported), and UDP (unsupported) connections
     oneof ListenerType {
         // The HTTP Listener is currently the only supported listener type.
-        // It contains configuration options for GLoo's HTTP-level features including request-based routing
+        // It contains configuration options for Gloo's HTTP-level features including request-based routing
         HttpListener http_listener = 4;
+
+        // The HTTP Listener is currently the only supported listener type.
+        // It contains configuration options for GLoo's HTTP-level features including request-based routing
+        TcpListener tcp_listener = 5;
     }
 
-    // SSL Config is optional for the listener. If provided, the listener will serve TLS for connections on this port
+    // SSL Config is optional for the listener. If provided, the listener will serve TLS for connections on this port.
     // Multiple SslConfigs are supported for the purpose of SNI. Be aware that the SNI domain provided in the SSL Config
-    // must match a domain in virtual host
-    // TODO(ilackarms): ensure that ssl configs without a matching virtual host are errored
-    repeated SslConfig ssl_configurations = 5;
+    repeated SslConfig ssl_configurations = 6;
 
     // Enable ProxyProtocol support for this listener
-    google.protobuf.BoolValue use_proxy_proto = 6;
+    google.protobuf.BoolValue use_proxy_proto = 7;
+
+    // top level plugins
+    ListenerPlugins plugins = 8;
+
+}
+
+message TcpListener {
+    // List of filter chains to match on for this listener
+    repeated TcpHost tcp_hosts = 1;
+    // Plugins contains top-level plugin configuration to be applied to a listener
+    // Listener config is applied to traffic for the given listener.
+    // Some configuration here can be overridden in
+    // Virtual Host Plugin configuration or Route Plugin configuration
+    TcpListenerPlugins plugins = 8;
+    // prefix for addressing envoy stats for the tcp proxy
+    string stat_prefix = 3;
+}
+
+message TcpHost {
+    // the logical name of the tcp host. names must be unique for each tcp host within a listener
+    string name = 1;
+    // Name of the destinations the gateway can route to.
+    // Note: the destination spec and subsets are not supported in this context and will be ignored.
+    RouteAction destination = 2;
+    // If provided, the Gateway will serve TLS/SSL traffic for this set of routes
+    gloo.solo.io.SslConfig ssl_config = 3;
 }
 
 // Use this listener to configure proxy behavior for any HTTP-level features including defining routes (via virtual services).
@@ -84,12 +115,13 @@ message HttpListener {
     // at least one virtual host must be specified for this listener to be active (else connections will be refused)
     // the set of domains for each virtual host must be unique, or the config will be considered invalid
     repeated VirtualHost virtual_hosts = 1;
-
-    // Plugins contains top-level plugin configuration to be applied to a listener
-    // Listener config is applied to all HTTP traffic that
-    // connects to this listener. Some configuration here can be overridden in
+    // Listener Plugins contains top-level plugin configuration to be applied to a listener
+    // Listener config is applied to traffic for the given listener.
+    // Some configuration here can be overridden in
     // Virtual Host Plugin configuration or Route Plugin configuration
-    ListenerPlugins listener_plugins = 2;
+    HttpListenerPlugins listener_plugins = 2;
+    // prefix for addressing envoy stats for the http connection manager
+    string stat_prefix = 3;
 }
 
 /*
@@ -119,8 +151,10 @@ message VirtualHost {
     // Some configuration here can be overridden by Route Plugins.
     VirtualHostPlugins virtual_host_plugins = 4;
 
-    // CorsPolicy defines Cross-Origin Resource Sharing for a virtual service.
-    CorsPolicy cors_policy = 5;
+    // Defines a CORS policy for the virtual host
+    // If a CORS policy is also defined on the route matched by the request, the policies are merged.
+    // DEPRECATED set cors policy through the Virtual Host Plugin
+    CorsPolicy cors_policy = 5 [deprecated=true];
 }
 
 /**
@@ -146,6 +180,12 @@ message Route {
     // Route Plugins extend the behavior of routes.
     // Route plugins include configuration such as retries,rate limiting, and request/response transformation.
     RoutePlugins route_plugins = 5;
+
+    // Metadata for the individual route
+    // This data is opaque to Gloo, used
+    // by controllers to track ownership of routes within a proxy
+    // as they are typically generated by a controller (such as the gateway)
+    google.protobuf.Struct route_metadata = 6;
 }
 
 // Parameters for matching routes to requests received by a Gloo-managed proxy
@@ -192,12 +232,8 @@ message Matcher {
     repeated string methods = 8;
 }
 
-//   Internally, Gloo always uses the HTTP/2 *:authority* header to represent the HTTP/1 *Host*
-//   header. Thus, if attempting to match on *Host*, match on *:authority* instead.
-//
-//   In the absence of any header match specifier, match will default to `present_match`
-//   i.e, a request that has the `name` header will match, regardless of the header's
-//   value.
+// Internally, Gloo always uses the HTTP/2 *:authority* header to represent the HTTP/1 *Host* header.
+// Thus, if attempting to match on *Host*, match on *:authority* instead.
 message HeaderMatcher {
     // Specifies the name of the header in the request.
     string name = 1;
@@ -208,6 +244,14 @@ message HeaderMatcher {
 
     // Specifies whether the header value should be treated as regex or not.
     bool regex = 3;
+
+    // If set to true, the result of the match will be inverted. Defaults to false.
+    //
+    // Examples:
+    // * name=foo, invert_match=true: matches if no header named `foo` is present
+    // * name=foo, value=bar, invert_match=true: matches if no header named `foo` with value `bar` is present
+    // * name=foo, value=``\d{3}``, regex=true, invert_match=true: matches if no header named `foo` with a value consisting of three integers is present
+    bool invert_match = 4;
 }
 
 // Query parameter matching treats the query string of a request's :path header
@@ -254,10 +298,14 @@ message Destination {
         // Route requests to a Gloo upstream
         core.solo.io.ResourceRef upstream = 10;
 
-        // TODO: currently not implemented
         // Route requests to a kubernetes service
-        ServiceDestination service = 11;
+        KubernetesServiceDestination kube = 11;
+
+        // Route requests to a consul service
+        ConsulServiceDestination consul = 12;
     }
+
+    // Note: When in the context of a TCP gateway the below 2 fields will be ignored
 
     // Some upstreams utilize plugins which require or permit additional configuration on routes targeting them.
     // gRPC upstreams, for example, allow specifying REST-style parameters for JSON-to-gRPC transcoding in the
@@ -271,7 +319,7 @@ message Destination {
 }
 
 // Identifies a port on a kubernetes service to route traffic to.
-message ServiceDestination {
+message KubernetesServiceDestination {
 
     // The target service
     core.solo.io.ResourceRef ref = 1 [(gogoproto.nullable) = false];
@@ -280,11 +328,28 @@ message ServiceDestination {
     uint32 port = 2;
 }
 
-/*
-@solo-kit:resource.short_name=ug
-@solo-kit:resource.plural_name=upstreamgroups
-*/
+// Identifies a [Consul](https://www.consul.io/) [service](https://www.consul.io/docs/agent/services.html) to route traffic to.
+// Multiple Consul services with the same name can present distinct sets of tags, listen of different ports, and live in
+// multiple data centers (see an example [here](https://www.consul.io/docs/agent/services.html#multiple-service-definitions)).
+// You can target the desired subset of services via the fields in this configuration. Gloo will detect the correspondent
+// IP addresses and ports and load balance traffic between them.
+message ConsulServiceDestination {
+
+    // The name of the target service. This field is required.
+    string service_name = 1;
+
+    // If provided, load balance traffic only between services matching all the given tags.
+    repeated string tags = 2;
+
+    // If provided, load balance traffic only between services running in the given
+    // [data centers](https://www.consul.io/docs/internals/architecture.html).
+    repeated string data_centers = 3;
+}
+
 message UpstreamGroup {
+
+    option (core.solo.io.resource).short_name = "ug";
+    option (core.solo.io.resource).plural_name = "upstream_groups";
 
     // The destinations that are part of this upstream group.
     repeated WeightedDestination destinations = 1;
@@ -312,9 +377,15 @@ message WeightedDestination {
     // Weight must be greater than zero
     // Routing to each destination will be balanced by the ratio of the destination's weight to the total weight on a route
     uint32 weight = 2;
+
+    //Deprecated: use weighted_destination_plugins
+    // Apply configuration to traffic that is sent to this weighted destination
+    WeightedDestinationPlugins weighed_destination_plugins = 3 [deprecated=true];
+
+    // Apply configuration to traffic that is sent to this weighted destination
+    WeightedDestinationPlugins weighted_destination_plugins = 4;
 }
 
-// TODO(ilackarms): evaluate how much to differentiate (or if even to include) RedirectAction
 // Notice: RedirectAction is copied directly from https://github.com/envoyproxy/envoy/blob/master/api/envoy/api/v2/route/route.proto
 message RedirectAction {
     // The host portion of the URL will be swapped with this value.
@@ -362,7 +433,6 @@ message RedirectAction {
     bool strip_query = 6;
 }
 
-// TODO(ilackarms): evaluate how much to differentiate (or if even to include) DirectResponseAction
 // DirectResponseAction is copied directly from https://github.com/envoyproxy/envoy/blob/master/api/envoy/api/v2/route/route.proto
 message DirectResponseAction {
     // Specifies the HTTP response status to be returned.
@@ -377,7 +447,9 @@ message DirectResponseAction {
 }
 
 // CorsPolicy defines Cross-Origin Resource Sharing for a virtual service.
+// DEPRECATED set cors policy through the Virtual Host Plugin
 message CorsPolicy {
+    option deprecated = true;
     // Specifies the origins that will be allowed to make CORS requests.
     //
     // An origin is allowed if either allow_origin or allow_origin_regex match.

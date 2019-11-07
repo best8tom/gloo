@@ -3,6 +3,7 @@
 package v1
 
 import (
+	"log"
 	"sort"
 
 	"github.com/solo-io/go-utils/hashutils"
@@ -34,11 +35,17 @@ func (r *Upstream) SetStatus(status core.Status) {
 func (r *Upstream) Hash() uint64 {
 	metaCopy := r.GetMetadata()
 	metaCopy.ResourceVersion = ""
+	metaCopy.Generation = 0
+	// investigate zeroing out owner refs as well
 	return hashutils.HashAll(
 		metaCopy,
 		r.UpstreamSpec,
 		r.DiscoveryMetadata,
 	)
+}
+
+func (r *Upstream) GroupVersionKind() schema.GroupVersionKind {
+	return UpstreamGVK
 }
 
 type UpstreamList []*Upstream
@@ -122,8 +129,6 @@ func (list UpstreamList) AsInterfaces() []interface{} {
 	return asInterfaces
 }
 
-var _ resources.Resource = &Upstream{}
-
 // Kubernetes Adapter for Upstream
 
 func (o *Upstream) GetObjectKind() schema.ObjectKind {
@@ -135,11 +140,32 @@ func (o *Upstream) DeepCopyObject() runtime.Object {
 	return resources.Clone(o).(*Upstream)
 }
 
-var UpstreamCrd = crd.NewCrd("gloo.solo.io",
-	"upstreams",
-	"gloo.solo.io",
-	"v1",
-	"Upstream",
-	"us",
-	false,
-	&Upstream{})
+func (o *Upstream) DeepCopyInto(out *Upstream) {
+	clone := resources.Clone(o).(*Upstream)
+	*out = *clone
+}
+
+var (
+	UpstreamCrd = crd.NewCrd(
+		"upstreams",
+		UpstreamGVK.Group,
+		UpstreamGVK.Version,
+		UpstreamGVK.Kind,
+		"us",
+		false,
+		&Upstream{})
+)
+
+func init() {
+	if err := crd.AddCrd(UpstreamCrd); err != nil {
+		log.Fatalf("could not add crd to global registry")
+	}
+}
+
+var (
+	UpstreamGVK = schema.GroupVersionKind{
+		Version: "v1",
+		Group:   "gloo.solo.io",
+		Kind:    "Upstream",
+	}
+)

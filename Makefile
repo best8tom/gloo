@@ -4,6 +4,10 @@
 
 ROOTDIR := $(shell pwd)
 OUTPUT_DIR ?= $(ROOTDIR)/_output
+
+# Kind of a hack to make sure _output exists
+z := $(shell mkdir -p $(OUTPUT_DIR))
+
 SOURCES := $(shell find . -name "*.go" | grep -v test.go | grep -v '\.\#*')
 RELEASE := "true"
 ifeq ($(TAGGED_VERSION),)
@@ -86,26 +90,34 @@ clean:
 	rm -rf _output
 	rm -rf _test
 	rm -fr site
-	git clean -xdf install
+	git clean -f -X install
 
 #----------------------------------------------------------------------------------
 # Generated Code and Docs
 #----------------------------------------------------------------------------------
 
 .PHONY: generated-code
-generated-code: $(OUTPUT_DIR)/.generated-code
+generated-code: $(OUTPUT_DIR)/.generated-code verify-enterprise-protos
 
 # Note: currently we generate CLI docs, but don't push them to the consolidated docs repo (gloo-docs). Instead, the
 # Glooctl enterprise docs are pushed from the private repo.
 # TODO(EItanya): make mockgen work for gloo
-SUBDIRS:=projects test
+SUBDIRS:=$(shell ls -d -- */ | grep -v vendor)
 $(OUTPUT_DIR)/.generated-code:
-	SKIP_MOCK_GEN=1 go generate ./...
+	# Clean up api docs before regenerating them to make sure we don't keep orphaned files around
+	rm -rf docs/api
+	go generate ./...
 	(rm docs/cli/glooctl*; go run projects/gloo/cli/cmd/docs/main.go)
 	gofmt -w $(SUBDIRS)
 	goimports -w $(SUBDIRS)
 	mkdir -p $(OUTPUT_DIR)
 	touch $@
+
+# Make sure that the enterprise API *.pb.go files that are generated but not used in this repo are valid.
+.PHONY: verify-enterprise-protos
+verify-enterprise-protos:
+	@echo Verifying validity of generated enterprise files...
+	CGO_ENABLED=0 GOARCH=amd64 GOOS=linux go build projects/gloo/pkg/api/v1/enterprise/verify.go
 
 #----------------------------------------------------------------------------------
 # Generate mocks
@@ -125,6 +137,7 @@ MOCK_RESOURCE_INFO := \
 	gloo:upstream:UpstreamClient \
 	gateway:gateway:GatewayClient \
 	gateway:virtual_service:VirtualServiceClient\
+	gateway:route_table:RouteTableClient\
 
 # Use gomock (https://github.com/golang/mock) to generate mocks for our resource clients.
 .PHONY: generate-client-mocks
@@ -192,6 +205,28 @@ gateway-docker: $(OUTPUT_DIR)/gateway-linux-amd64 $(OUTPUT_DIR)/Dockerfile.gatew
 		$(call get_test_tag,gateway)
 
 #----------------------------------------------------------------------------------
+# Gateway Conversion
+#----------------------------------------------------------------------------------
+
+GATEWAY_CONVERSION_DIR=projects/gateway/pkg/conversion
+GATEWAY_CONVERSION_SOURCES=$(call get_sources,$(GATEWAY_CONVERSION_DIR))
+
+$(OUTPUT_DIR)/gateway-conversion-linux-amd64: $(GATEWAY_CONVERSION_SOURCES)
+	CGO_ENABLED=0 GOARCH=amd64 GOOS=linux go build -ldflags=$(LDFLAGS) -gcflags=$(GCFLAGS) -o $@ $(GATEWAY_CONVERSION_DIR)/cmd/main.go
+
+
+.PHONY: gateway-conversion
+gateway-conversion: $(OUTPUT_DIR)/gateway-conversion-linux-amd64
+
+$(OUTPUT_DIR)/Dockerfile.gateway-conversion: $(GATEWAY_CONVERSION_DIR)/cmd/Dockerfile
+	cp $< $@
+
+gateway-conversion-docker: $(OUTPUT_DIR)/gateway-conversion-linux-amd64 $(OUTPUT_DIR)/Dockerfile.gateway-conversion
+	docker build $(OUTPUT_DIR) -f $(OUTPUT_DIR)/Dockerfile.gateway-conversion \
+		-t quay.io/solo-io/gateway-conversion:$(VERSION) \
+		$(call get_test_tag,gateway-conversion)
+
+#----------------------------------------------------------------------------------
 # Ingress
 #----------------------------------------------------------------------------------
 
@@ -212,6 +247,28 @@ ingress-docker: $(OUTPUT_DIR)/ingress-linux-amd64 $(OUTPUT_DIR)/Dockerfile.ingre
 	docker build $(OUTPUT_DIR) -f $(OUTPUT_DIR)/Dockerfile.ingress \
 		-t quay.io/solo-io/ingress:$(VERSION) \
 		$(call get_test_tag,ingress)
+
+#----------------------------------------------------------------------------------
+# Access Logger
+#----------------------------------------------------------------------------------
+
+ACCESS_LOG_DIR=projects/accesslogger
+ACCESS_LOG_SOURCES=$(call get_sources,$(ACCESS_LOG_DIR))
+
+$(OUTPUT_DIR)/access-logger-linux-amd64: $(ACCESS_LOG_SOURCES)
+	CGO_ENABLED=0 GOARCH=amd64 GOOS=linux go build -ldflags=$(LDFLAGS) -gcflags=$(GCFLAGS) -o $@ $(ACCESS_LOG_DIR)/cmd/main.go
+
+
+.PHONY: access-logger
+access-logger: $(OUTPUT_DIR)/access-logger-linux-amd64
+
+$(OUTPUT_DIR)/Dockerfile.access-logger: $(ACCESS_LOG_DIR)/cmd/Dockerfile
+	cp $< $@
+
+access-logger-docker: $(OUTPUT_DIR)/access-logger-linux-amd64 $(OUTPUT_DIR)/Dockerfile.access-logger
+	docker build $(OUTPUT_DIR) -f $(OUTPUT_DIR)/Dockerfile.access-logger \
+		-t quay.io/solo-io/access-logger:$(VERSION) \
+		$(call get_test_tag,access-logger)
 
 #----------------------------------------------------------------------------------
 # Discovery
@@ -282,10 +339,34 @@ gloo-envoy-wrapper-docker: $(OUTPUT_DIR)/envoyinit-linux-amd64 $(OUTPUT_DIR)/Doc
 
 
 #----------------------------------------------------------------------------------
+# Certgen - Job for creating TLS Secrets in Kubernetes
+#----------------------------------------------------------------------------------
+
+CERTGEN_DIR=jobs/certgen/cmd
+CERTGEN_SOURCES=$(call get_sources,$(CERTGEN_DIR))
+
+$(OUTPUT_DIR)/certgen-linux-amd64: $(CERTGEN_SOURCES)
+	CGO_ENABLED=0 GOARCH=amd64 GOOS=linux go build -ldflags=$(LDFLAGS) -gcflags=$(GCFLAGS) -o $@ $(CERTGEN_DIR)/main.go
+
+.PHONY: certgen
+certgen: $(OUTPUT_DIR)/certgen-linux-amd64
+
+
+$(OUTPUT_DIR)/Dockerfile.certgen: $(CERTGEN_DIR)/Dockerfile
+	cp $< $@
+
+.PHONY: certgen-docker
+certgen-docker: $(OUTPUT_DIR)/certgen-linux-amd64 $(OUTPUT_DIR)/Dockerfile.certgen
+	docker build $(OUTPUT_DIR) -f $(OUTPUT_DIR)/Dockerfile.certgen \
+		-t quay.io/solo-io/certgen:$(VERSION) \
+		$(call get_test_tag,certgen)
+
+
+#----------------------------------------------------------------------------------
 # Build All
 #----------------------------------------------------------------------------------
 .PHONY: build
-build: gloo glooctl gateway discovery envoyinit ingress 
+build: gloo glooctl gateway gateway-conversion discovery envoyinit certgen ingress
 
 #----------------------------------------------------------------------------------
 # Deployment Manifests / Helm
@@ -299,29 +380,46 @@ INSTALL_NAMESPACE ?= gloo-system
 manifest: prepare-helm install/gloo-gateway.yaml install/gloo-knative.yaml update-helm-chart
 
 # creates Chart.yaml, values.yaml, values-knative.yaml, values-ingress.yaml. See install/helm/gloo/README.md for more info.
-prepare-helm:
+.PHONY: prepare-helm
+prepare-helm: $(OUTPUT_DIR)/.helm-prepared
+
+$(OUTPUT_DIR)/.helm-prepared:
 	go run install/helm/gloo/generate.go $(VERSION)
+	touch $@
 
 update-helm-chart:
-ifeq ($(RELEASE),"true")
 	mkdir -p $(HELM_SYNC_DIR)/charts
 	helm package --destination $(HELM_SYNC_DIR)/charts $(HELM_DIR)/gloo
 	helm repo index $(HELM_SYNC_DIR)
-endif
 
 HELMFLAGS ?= --namespace $(INSTALL_NAMESPACE) --set namespace.create=true
 
+MANIFEST_OUTPUT = > /dev/null
+ifneq ($(BUILD_ID),)
+MANIFEST_OUTPUT =
+endif
+
 install/gloo-gateway.yaml: prepare-helm
-	helm template install/helm/gloo $(HELMFLAGS) > $@
+	helm template install/helm/gloo $(HELMFLAGS) | tee $@ $(OUTPUT_YAML) $(MANIFEST_OUTPUT)
 
 install/gloo-knative.yaml: prepare-helm
-	helm template install/helm/gloo $(HELMFLAGS) --values install/helm/gloo/values-knative.yaml > $@
+	helm template install/helm/gloo $(HELMFLAGS) --values install/helm/gloo/values-knative.yaml | tee $@ $(OUTPUT_YAML) $(MANIFEST_OUTPUT)
 
 install/gloo-ingress.yaml: prepare-helm
-	helm template install/helm/gloo $(HELMFLAGS) --values install/helm/gloo/values-ingress.yaml > $@
+	helm template install/helm/gloo $(HELMFLAGS) --values install/helm/gloo/values-ingress.yaml | tee $@ $(OUTPUT_YAML) $(MANIFEST_OUTPUT)
 
 .PHONY: render-yaml
 render-yaml: install/gloo-gateway.yaml install/gloo-knative.yaml install/gloo-ingress.yaml
+
+.PHONY: save-helm
+save-helm:
+ifeq ($(RELEASE),"true")
+	gsutil -m rsync -r './_output/helm' gs://solo-public-helm/
+endif
+
+.PHONY: fetch-helm
+fetch-helm:
+	gsutil -m rsync -r gs://solo-public-helm/ './_output/helm'
 
 #----------------------------------------------------------------------------------
 # Release
@@ -350,7 +448,7 @@ ifeq ($(RELEASE),"true")
 endif
 
 .PHONY: docker docker-push
-docker: discovery-docker gateway-docker gloo-docker gloo-envoy-wrapper-docker ingress-docker
+docker: discovery-docker gateway-docker gateway-conversion-docker gloo-docker gloo-envoy-wrapper-docker certgen-docker ingress-docker access-logger-docker
 
 # Depends on DOCKER_IMAGES, which is set to docker if RELEASE is "true", otherwise empty (making this a no-op).
 # This prevents executing the dependent targets if RELEASE is not true, while still enabling `make docker`
@@ -359,18 +457,23 @@ docker: discovery-docker gateway-docker gloo-docker gloo-envoy-wrapper-docker in
 docker-push: $(DOCKER_IMAGES)
 ifeq ($(RELEASE),"true")
 	docker push quay.io/solo-io/gateway:$(VERSION) && \
+	docker push quay.io/solo-io/gateway-conversion:$(VERSION) && \
 	docker push quay.io/solo-io/ingress:$(VERSION) && \
 	docker push quay.io/solo-io/discovery:$(VERSION) && \
 	docker push quay.io/solo-io/gloo:$(VERSION) && \
-	docker push quay.io/solo-io/gloo-envoy-wrapper:$(VERSION)
+	docker push quay.io/solo-io/gloo-envoy-wrapper:$(VERSION) && \
+	docker push quay.io/solo-io/certgen:$(VERSION) && \
+	docker push quay.io/solo-io/access-logger:$(VERSION)
 endif
 
 push-kind-images: docker
 	kind load docker-image quay.io/solo-io/gateway:$(VERSION) --name $(CLUSTER_NAME)
+	kind load docker-image quay.io/solo-io/gateway-conversion:$(VERSION) --name $(CLUSTER_NAME)
 	kind load docker-image quay.io/solo-io/ingress:$(VERSION) --name $(CLUSTER_NAME)
 	kind load docker-image quay.io/solo-io/discovery:$(VERSION) --name $(CLUSTER_NAME)
 	kind load docker-image quay.io/solo-io/gloo:$(VERSION) --name $(CLUSTER_NAME)
 	kind load docker-image quay.io/solo-io/gloo-envoy-wrapper:$(VERSION) --name $(CLUSTER_NAME)
+	kind load docker-image quay.io/solo-io/certgen:$(VERSION) --name $(CLUSTER_NAME)
 
 
 #----------------------------------------------------------------------------------
@@ -393,13 +496,16 @@ build-test-assets: push-test-images build-test-chart $(OUTPUT_DIR)/glooctl-linux
 .PHONY: build-kind-assets
 build-kind-assets: push-kind-images build-kind-chart $(OUTPUT_DIR)/glooctl-linux-amd64 $(OUTPUT_DIR)/glooctl-darwin-amd64
 
-TEST_DOCKER_TARGETS := gateway-docker-test ingress-docker-test discovery-docker-test gloo-docker-test gloo-envoy-wrapper-docker-test
+TEST_DOCKER_TARGETS := gateway-docker-test gateway-conversion-docker-test ingress-docker-test discovery-docker-test gloo-docker-test gloo-envoy-wrapper-docker-test certgen-docker-test
 
 .PHONY: push-test-images $(TEST_DOCKER_TARGETS)
 push-test-images: $(TEST_DOCKER_TARGETS)
 
 gateway-docker-test: $(OUTPUT_DIR)/gateway-linux-amd64 $(OUTPUT_DIR)/Dockerfile.gateway
 	docker push $(GCR_REPO_PREFIX)/gateway:$(TEST_IMAGE_TAG)
+
+gateway-conversion-docker-test: $(OUTPUT_DIR)/gateway-conversion-linux-amd64 $(OUTPUT_DIR)/Dockerfile.gateway-conversion
+	docker push $(GCR_REPO_PREFIX)/gateway-conversion:$(TEST_IMAGE_TAG)
 
 ingress-docker-test: $(OUTPUT_DIR)/ingress-linux-amd64 $(OUTPUT_DIR)/Dockerfile.ingress
 	docker push $(GCR_REPO_PREFIX)/ingress:$(TEST_IMAGE_TAG)
@@ -413,10 +519,13 @@ gloo-docker-test: $(OUTPUT_DIR)/gloo-linux-amd64 $(OUTPUT_DIR)/Dockerfile.gloo
 gloo-envoy-wrapper-docker-test: $(OUTPUT_DIR)/envoyinit-linux-amd64 $(OUTPUT_DIR)/Dockerfile.envoyinit
 	docker push $(GCR_REPO_PREFIX)/gloo-envoy-wrapper:$(TEST_IMAGE_TAG)
 
+certgen-docker-test: $(OUTPUT_DIR)/certgen-linux-amd64 $(OUTPUT_DIR)/Dockerfile.certgen
+	docker push $(GCR_REPO_PREFIX)/certgen:$(TEST_IMAGE_TAG)
+
 .PHONY: build-test-chart
 build-test-chart:
 	mkdir -p $(TEST_ASSET_DIR)
-	go run install/helm/gloo/generate.go $(TEST_IMAGE_TAG) $(GCR_REPO_PREFIX)
+	go run install/helm/gloo/generate.go $(TEST_IMAGE_TAG) $(GCR_REPO_PREFIX) "Always"
 	helm package --destination $(TEST_ASSET_DIR) $(HELM_DIR)/gloo
 	helm repo index $(TEST_ASSET_DIR)
 

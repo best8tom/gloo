@@ -49,6 +49,13 @@ node:
  id: {{.ID}}
  metadata:
   role: {{.Role}}
+{{if .MetricsAddr}}
+stats_sinks:
+  - name: envoy.metrics_service
+    config:
+      grpc_service:
+        envoy_grpc: {cluster_name: metrics_cluster}
+{{end}}
 
 static_resources:
   clusters:
@@ -67,6 +74,26 @@ static_resources:
     - socket_address:
         address: {{.RatelimitAddr}}
         port_value: {{.RatelimitPort}}
+    http2_protocol_options: {}
+    type: STATIC
+{{end}}
+{{if .AccessLogAddr}}
+  - name: access_log_cluster
+    connect_timeout: 5.000s
+    hosts:
+    - socket_address:
+        address: {{.AccessLogAddr}}
+        port_value: {{.AccessLogPort}}
+    http2_protocol_options: {}
+    type: STATIC
+{{end}}
+{{if .MetricsAddr}}
+  - name: metrics_cluster
+    connect_timeout: 5.000s
+    hosts:
+    - socket_address:
+        address: {{.MetricsAddr}}
+        port_value: {{.MetricsPort}}
     http2_protocol_options: {}
     type: STATIC
 {{end}}
@@ -102,20 +129,20 @@ type EnvoyFactory struct {
 func NewEnvoyFactory() (*EnvoyFactory, error) {
 	// if an envoy binary is explicitly specified
 	// use it
-	envoypath := os.Getenv("ENVOY_BINARY")
-	if envoypath != "" {
-		log.Printf("Using envoy from environment variable: %s", envoypath)
+	envoyPath := os.Getenv("ENVOY_BINARY")
+	if envoyPath != "" {
+		log.Printf("Using envoy from environment variable: %s", envoyPath)
 		return &EnvoyFactory{
-			envoypath: envoypath,
+			envoypath: envoyPath,
 		}, nil
 	}
 
 	// maybe it is in the path?!
-	envoypath, err := exec.LookPath("envoy")
+	envoyPath, err := exec.LookPath("envoy")
 	if err == nil {
-		log.Printf("Using envoy from PATH: %s", envoypath)
+		log.Printf("Using envoy from PATH: %s", envoyPath)
 		return &EnvoyFactory{
-			envoypath: envoypath,
+			envoypath: envoyPath,
 		}, nil
 	}
 
@@ -190,6 +217,10 @@ func (ef *EnvoyFactory) Clean() error {
 }
 
 type EnvoyInstance struct {
+	MetricsAddr   string
+	MetricsPort   uint32
+	AccessLogAddr string
+	AccessLogPort uint32
 	RatelimitAddr string
 	RatelimitPort uint32
 	ID            string
@@ -198,10 +229,12 @@ type EnvoyInstance struct {
 	envoycfg      string
 	logs          *bytes.Buffer
 	cmd           *exec.Cmd
-	useDocker     bool
+	UseDocker     bool
 	GlooAddr      string // address for gloo and services
 	Port          uint32
 	AdminPort     uint32
+	// Path to access logs for binary run
+	AccessLogs string
 }
 
 func (ef *EnvoyFactory) NewEnvoyInstance() (*EnvoyInstance, error) {
@@ -217,10 +250,12 @@ func (ef *EnvoyFactory) NewEnvoyInstance() (*EnvoyInstance, error) {
 	}
 
 	ei := &EnvoyInstance{
-		envoypath: ef.envoypath,
-		useDocker: ef.useDocker,
-		GlooAddr:  gloo,
-		AdminPort: atomic.AddUint32(&adminPort, 1) + uint32(config.GinkgoConfig.ParallelNode*1000),
+		envoypath:     ef.envoypath,
+		UseDocker:     ef.useDocker,
+		GlooAddr:      gloo,
+		AccessLogAddr: gloo,
+		MetricsAddr:   gloo,
+		AdminPort:     atomic.AddUint32(&adminPort, 1) + uint32(config.GinkgoConfig.ParallelNode*1000),
 	}
 	ef.instances = append(ef.instances, ei)
 	return ei, nil
@@ -259,7 +294,7 @@ func (ei *EnvoyInstance) runWithPort(port uint32) error {
 	ei.Port = port
 
 	ei.envoycfg = ei.buildBootstrap()
-	if ei.useDocker {
+	if ei.UseDocker {
 		err := ei.runContainer()
 		if err != nil {
 			return err
@@ -295,6 +330,11 @@ func (ei *EnvoyInstance) LocalAddr() string {
 	return ei.GlooAddr
 }
 
+func (ei *EnvoyInstance) SetPanicThreshold() error {
+	_, err := http.Post(fmt.Sprintf("http://localhost:%d/runtime_modify?upstream.healthy_panic_threshold=%d", ei.AdminPort, 0), "", nil)
+	return err
+}
+
 func (ei *EnvoyInstance) Clean() error {
 	http.Post(fmt.Sprintf("http://localhost:%d/quitquitquit", ei.AdminPort), "", nil)
 	if ei.cmd != nil {
@@ -302,7 +342,7 @@ func (ei *EnvoyInstance) Clean() error {
 		ei.cmd.Wait()
 	}
 
-	if ei.useDocker {
+	if ei.UseDocker {
 		if err := stopContainer(); err != nil {
 			return err
 		}
@@ -313,14 +353,15 @@ func (ei *EnvoyInstance) Clean() error {
 func (ei *EnvoyInstance) runContainer() error {
 	envoyImageTag := os.Getenv("ENVOY_IMAGE_TAG")
 	if envoyImageTag == "" {
-		envoyImageTag = "latest"
+		return errors.New("Must set the ENVOY_IMAGE_TAG env var")
 	}
 
-	image := "soloio/envoy-gloo:" + envoyImageTag
+	image := "quay.io/solo-io/gloo-envoy-wrapper:" + envoyImageTag
 	args := []string{"run", "--rm", "--name", containerName,
 		"-p", fmt.Sprintf("%d:%d", defaults.HttpPort, defaults.HttpPort),
 		"-p", fmt.Sprintf("%d:%d", defaults.HttpsPort, defaults.HttpsPort),
 		"-p", fmt.Sprintf("%d:%d", ei.AdminPort, ei.AdminPort),
+		"--entrypoint=envoy",
 		image,
 		"--disable-hot-restart", "--log-level", "debug",
 		"--config-yaml", ei.envoycfg,
@@ -330,10 +371,10 @@ func (ei *EnvoyInstance) runContainer() error {
 	cmd := exec.Command("docker", args...)
 	cmd.Stdout = ginkgo.GinkgoWriter
 	cmd.Stderr = ginkgo.GinkgoWriter
-	err := cmd.Start()
-	if err != nil {
+	if err := cmd.Start(); err != nil {
 		return errors.Wrap(err, "Unable to start envoy container")
 	}
+
 	return nil
 }
 
@@ -384,6 +425,16 @@ func localAddr() (string, error) {
 	return "", errors.New("unable to find Gloo IP")
 }
 
-func (ei *EnvoyInstance) Logs() string {
-	return ei.logs.String()
+func (ei *EnvoyInstance) Logs() (string, error) {
+	if ei.UseDocker {
+		logsArgs := []string{"logs", containerName}
+		cmd := exec.Command("docker", logsArgs...)
+		byt, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", errors.Wrap(err, "Unable to fetch logs from envoy container")
+		}
+		return string(byt), nil
+	}
+
+	return ei.logs.String(), nil
 }

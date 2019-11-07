@@ -2,6 +2,11 @@ package e2e_test
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"time"
+
+	gatewaydefaults "github.com/solo-io/gloo/projects/gateway/pkg/defaults"
 
 	"github.com/solo-io/gloo/pkg/utils"
 	"github.com/solo-io/solo-kit/pkg/api/v1/resources/common/kubernetes"
@@ -12,6 +17,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	gatewayv1 "github.com/solo-io/gloo/projects/gateway/pkg/api/v1"
+	gatewayv2 "github.com/solo-io/gloo/projects/gateway/pkg/api/v2"
 	gloov1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1"
 	"github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/grpc_web"
 	"github.com/solo-io/gloo/projects/gloo/pkg/defaults"
@@ -51,7 +57,7 @@ var _ = Describe("Gateway", func() {
 			testClients = services.RunGlooGatewayUdsFds(ctx, ro)
 
 			// wait for the two gateways to be created.
-			Eventually(func() (gatewayv1.GatewayList, error) {
+			Eventually(func() (gatewayv2.GatewayList, error) {
 				return testClients.GatewayClient.List(writeNamespace, clients.ListOpts{})
 			}, "10s", "0.1s").Should(HaveLen(2))
 		})
@@ -67,11 +73,15 @@ var _ = Describe("Gateway", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			for _, g := range gw {
-				g.Plugins = &gloov1.ListenerPlugins{
-					GrpcWeb: &grpc_web.GrpcWeb{
-						Disable: true,
-					},
+				httpGateway := g.GetHttpGateway()
+				if httpGateway != nil {
+					httpGateway.Plugins = &gloov1.HttpListenerPlugins{
+						GrpcWeb: &grpc_web.GrpcWeb{
+							Disable: true,
+						},
+					}
 				}
+
 				_, err := gatewayClient.Write(g, clients.WriteOpts{Ctx: ctx, OverwriteExisting: true})
 				Expect(err).NotTo(HaveOccurred())
 			}
@@ -85,7 +95,7 @@ var _ = Describe("Gateway", func() {
 			Eventually(
 				func() (int, error) {
 					numdisable := 0
-					proxy, err := testClients.ProxyClient.Read(writeNamespace, "gateway-proxy", clients.ReadOpts{})
+					proxy, err := testClients.ProxyClient.Read(writeNamespace, gatewaydefaults.GatewayProxyName, clients.ReadOpts{})
 					if err != nil {
 						return 0, err
 					}
@@ -98,7 +108,6 @@ var _ = Describe("Gateway", func() {
 									}
 								}
 							}
-
 						}
 					}
 					return numdisable, nil
@@ -137,7 +146,7 @@ var _ = Describe("Gateway", func() {
 			// Wait for proxy to be accepted
 			var proxy *gloov1.Proxy
 			Eventually(func() bool {
-				proxy, err = testClients.ProxyClient.Read(writeNamespace, "gateway-proxy", clients.ReadOpts{})
+				proxy, err = testClients.ProxyClient.Read(writeNamespace, gatewaydefaults.GatewayProxyName, clients.ReadOpts{})
 				if err != nil {
 					return false
 				}
@@ -158,7 +167,7 @@ var _ = Describe("Gateway", func() {
 			Expect(nonSslListener.GetHttpListener().VirtualHosts[0].Routes).To(HaveLen(1))
 			Expect(nonSslListener.GetHttpListener().VirtualHosts[0].Routes[0].GetRouteAction()).NotTo(BeNil())
 			Expect(nonSslListener.GetHttpListener().VirtualHosts[0].Routes[0].GetRouteAction().GetSingle()).NotTo(BeNil())
-			service := nonSslListener.GetHttpListener().VirtualHosts[0].Routes[0].GetRouteAction().GetSingle().GetService()
+			service := nonSslListener.GetHttpListener().VirtualHosts[0].Routes[0].GetRouteAction().GetSingle().GetKube()
 			Expect(service.Ref.Namespace).To(Equal(svc.Namespace))
 			Expect(service.Ref.Name).To(Equal(svc.Name))
 			Expect(service.Port).To(BeEquivalentTo(svc.Spec.Ports[0].Port))
@@ -186,7 +195,7 @@ var _ = Describe("Gateway", func() {
 				_, err = testClients.UpstreamClient.Write(tu.Upstream, clients.WriteOpts{})
 				Expect(err).NotTo(HaveOccurred())
 
-				err = envoyInstance.RunWithRole(writeNamespace+"~gateway-proxy", testClients.GlooPort)
+				err = envoyInstance.RunWithRole(writeNamespace+"~gateway-proxy-v2", testClients.GlooPort)
 				Expect(err).NotTo(HaveOccurred())
 			})
 
@@ -203,6 +212,40 @@ var _ = Describe("Gateway", func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				TestUpstreamReachable()
+			})
+
+			It("should not match requests that contain a header that is excluded from match", func() {
+				up := tu.Upstream
+				vs := getTrivialVirtualServiceForUpstream("default", up.Metadata.Ref())
+				_, err := testClients.VirtualServiceClient.Write(vs, clients.WriteOpts{})
+				Expect(err).NotTo(HaveOccurred())
+
+				// Create a regular request
+				request, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/", defaults.HttpPort), nil)
+				Expect(err).NotTo(HaveOccurred())
+				request = request.WithContext(ctx)
+
+				// Check that we can reach the upstream
+				client := &http.Client{}
+				Eventually(func() int {
+					response, err := client.Do(request)
+					if err != nil {
+						return 0
+					}
+					return response.StatusCode
+				}, 5*time.Second, 500*time.Millisecond).Should(Equal(200))
+
+				// Add the header that we are explicitly excluding from the match
+				request.Header = map[string][]string{"this-header-must-not-be-present": {"some-value"}}
+
+				// We should get a 404
+				Consistently(func() int {
+					response, err := client.Do(request)
+					if err != nil {
+						return 0
+					}
+					return response.StatusCode
+				}, time.Second, 200*time.Millisecond).Should(Equal(404))
 			})
 
 			Context("ssl", func() {
@@ -261,8 +304,8 @@ func getTrivialVirtualServiceForUpstream(ns string, upstream core.ResourceRef) *
 
 func getTrivialVirtualServiceForService(ns string, service core.ResourceRef, port uint32) *gatewayv1.VirtualService {
 	vs := getTrivialVirtualService(ns)
-	vs.VirtualHost.Routes[0].GetRouteAction().GetSingle().DestinationType = &gloov1.Destination_Service{
-		Service: &gloov1.ServiceDestination{
+	vs.VirtualHost.Routes[0].GetRouteAction().GetSingle().DestinationType = &gloov1.Destination_Kube{
+		Kube: &gloov1.KubernetesServiceDestination{
 			Ref:  service,
 			Port: port,
 		},
@@ -276,16 +319,21 @@ func getTrivialVirtualService(ns string) *gatewayv1.VirtualService {
 			Name:      "vs",
 			Namespace: ns,
 		},
-		VirtualHost: &gloov1.VirtualHost{
-			Name:    "virt1",
+		VirtualHost: &gatewayv1.VirtualHost{
 			Domains: []string{"*"},
-			Routes: []*gloov1.Route{{
+			Routes: []*gatewayv1.Route{{
 				Matcher: &gloov1.Matcher{
 					PathSpecifier: &gloov1.Matcher_Prefix{
 						Prefix: "/",
 					},
+					Headers: []*gloov1.HeaderMatcher{
+						{
+							Name:        "this-header-must-not-be-present",
+							InvertMatch: true,
+						},
+					},
 				},
-				Action: &gloov1.Route_RouteAction{
+				Action: &gatewayv1.Route_RouteAction{
 					RouteAction: &gloov1.RouteAction{
 						Destination: &gloov1.RouteAction_Single{
 							Single: &gloov1.Destination{

@@ -1,7 +1,6 @@
 namespace:
   create: false
-rbac:
-  create: true
+installConfig: {}
 crds:
   create: true
 k8s:
@@ -9,51 +8,69 @@ k8s:
 
 settings:
   # if this is set to false, default settings will be created by pods upon boot
-  create: false
+  create: true
   integrations:
     knative:
       enabled: false
   # namespaces that Gloo should watch. this includes watches set for pods, services, as well as CRD configuration objects
   watchNamespaces: []
-  # the namespace that Gloo should write discovery data (Upstreams)
-  writeNamespace: "gloo-system"
 
 gloo:
   deployment:
     image:
-      repository: quay.io/solo-io/gloo
-      pullPolicy: Always
+      repository: gloo
     xdsPort: 9977
+    validationPort: 9988
     replicas: 1
     stats: true
+    runAsUser: 10101
 
 discovery:
-  deployment:
-    image:
-      repository: quay.io/solo-io/discovery
-      pullPolicy: Always
-    replicas: 1
-    stats: true
-
-gateway:
   enabled: true
   deployment:
     image:
-      repository: quay.io/solo-io/gateway
-      pullPolicy: Always
+      repository: discovery
     replicas: 1
     stats: true
+    runAsUser: 10101
+
+gateway:
+  enabled: true
+  validation:
+    failurePolicy: "Ignore"
+    secretName: gateway-validation-certs
+    alwaysAcceptResources: true
+  upgrade: false
+  deployment:
+    image:
+      repository: gateway
+    replicas: 1
+    stats: true
+    runAsUser: 10101
+  conversionJob:
+    image:
+      repository: gateway-conversion
+    restartPolicy: Never
+  certGenJob:
+    image:
+      repository: certgen
+    restartPolicy: OnFailure
+  proxyServiceAccount: {}
 
 gatewayProxies:
-  gateway-proxy:
-    deployment:
+  gatewayProxyV2:
+    gatewaySettings: {}
+    stats: true
+    kind:
+       deployment:
+         replicas: 1
+    podTemplate:
+      probes: false
       image:
-        repository: quay.io/solo-io/gloo-envoy-wrapper
-        pullPolicy: Always
-      stats: true
+        repository: gloo-envoy-wrapper
       httpPort: 8080
       httpsPort: 8443
-      replicas: 1
+      runAsUser: 10101
     service:
       type: LoadBalancer
       # clusterIP: None
@@ -62,9 +79,24 @@ gatewayProxies:
     # Annotation example: setup ssl with aws cert when service.type is LoadBalancer
     # extraAnnotations:
     #   service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:us-east-1:EXAMPLE_CERT
+    tracing:
     configMap:
       data:
 
+accessLogger:
+  enabled: false
+  port: 8083
+  serviceName: AccessLog
+  image:
+    repository: access-logger
+  replicas: 1
 
 ingress:
   enabled: false
+
+global:
+  image:
+    registry: quay.io/solo-io
+    pullPolicy: IfNotPresent
+  glooRbac:
+    create: true

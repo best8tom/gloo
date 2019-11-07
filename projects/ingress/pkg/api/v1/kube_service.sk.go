@@ -3,6 +3,7 @@
 package v1
 
 import (
+	"log"
 	"sort"
 
 	"github.com/solo-io/go-utils/hashutils"
@@ -30,11 +31,17 @@ func (r *KubeService) SetMetadata(meta core.Metadata) {
 func (r *KubeService) Hash() uint64 {
 	metaCopy := r.GetMetadata()
 	metaCopy.ResourceVersion = ""
+	metaCopy.Generation = 0
+	// investigate zeroing out owner refs as well
 	return hashutils.HashAll(
 		metaCopy,
 		r.KubeServiceSpec,
 		r.KubeServiceStatus,
 	)
+}
+
+func (r *KubeService) GroupVersionKind() schema.GroupVersionKind {
+	return KubeServiceGVK
 }
 
 type KubeServiceList []*KubeService
@@ -110,8 +117,6 @@ func (list KubeServiceList) AsInterfaces() []interface{} {
 	return asInterfaces
 }
 
-var _ resources.Resource = &KubeService{}
-
 // Kubernetes Adapter for KubeService
 
 func (o *KubeService) GetObjectKind() schema.ObjectKind {
@@ -123,11 +128,32 @@ func (o *KubeService) DeepCopyObject() runtime.Object {
 	return resources.Clone(o).(*KubeService)
 }
 
-var KubeServiceCrd = crd.NewCrd("ingress.solo.io",
-	"services",
-	"ingress.solo.io",
-	"v1",
-	"KubeService",
-	"sv",
-	false,
-	&KubeService{})
+func (o *KubeService) DeepCopyInto(out *KubeService) {
+	clone := resources.Clone(o).(*KubeService)
+	*out = *clone
+}
+
+var (
+	KubeServiceCrd = crd.NewCrd(
+		"services",
+		KubeServiceGVK.Group,
+		KubeServiceGVK.Version,
+		KubeServiceGVK.Kind,
+		"sv",
+		false,
+		&KubeService{})
+)
+
+func init() {
+	if err := crd.AddCrd(KubeServiceCrd); err != nil {
+		log.Fatalf("could not add crd to global registry")
+	}
+}
+
+var (
+	KubeServiceGVK = schema.GroupVersionKind{
+		Version: "v1",
+		Group:   "ingress.solo.io",
+		Kind:    "KubeService",
+	}
+)

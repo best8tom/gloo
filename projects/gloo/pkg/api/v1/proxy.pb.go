@@ -23,7 +23,7 @@ var _ = math.Inf
 // is compatible with the proto package it is being compiled against.
 // A compilation error at this line likely means your copy of the
 // proto package needs to be updated.
-const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
+const _ = proto.GoGoProtoPackageIsVersion3 // please upgrade the proto package
 
 type RedirectAction_RedirectResponseCode int32
 
@@ -61,12 +61,9 @@ func (x RedirectAction_RedirectResponseCode) String() string {
 }
 
 func (RedirectAction_RedirectResponseCode) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{14, 0}
+	return fileDescriptor_c6a47f72e9923590, []int{17, 0}
 }
 
-//
-//@solo-kit:resource.short_name=px
-//@solo-kit:resource.plural_name=proxies
 //
 //A Proxy is a container for the entire set of configuration that will to be applied to one or more Proxy instances.
 //Proxies can be understood as a set of listeners, represents a different bind address/port where the proxy will listen
@@ -155,14 +152,15 @@ type Listener struct {
 	//
 	// Types that are valid to be assigned to ListenerType:
 	//	*Listener_HttpListener
+	//	*Listener_TcpListener
 	ListenerType isListener_ListenerType `protobuf_oneof:"ListenerType"`
-	// SSL Config is optional for the listener. If provided, the listener will serve TLS for connections on this port
+	// SSL Config is optional for the listener. If provided, the listener will serve TLS for connections on this port.
 	// Multiple SslConfigs are supported for the purpose of SNI. Be aware that the SNI domain provided in the SSL Config
-	// must match a domain in virtual host
-	// TODO(ilackarms): ensure that ssl configs without a matching virtual host are errored
-	SslConfigurations []*SslConfig `protobuf:"bytes,5,rep,name=ssl_configurations,json=sslConfigurations,proto3" json:"ssl_configurations,omitempty"`
+	SslConfigurations []*SslConfig `protobuf:"bytes,6,rep,name=ssl_configurations,json=sslConfigurations,proto3" json:"ssl_configurations,omitempty"`
 	// Enable ProxyProtocol support for this listener
-	UseProxyProto        *types.BoolValue `protobuf:"bytes,6,opt,name=use_proxy_proto,json=useProxyProto,proto3" json:"use_proxy_proto,omitempty"`
+	UseProxyProto *types.BoolValue `protobuf:"bytes,7,opt,name=use_proxy_proto,json=useProxyProto,proto3" json:"use_proxy_proto,omitempty"`
+	// top level plugins
+	Plugins              *ListenerPlugins `protobuf:"bytes,8,opt,name=plugins,proto3" json:"plugins,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}         `json:"-"`
 	XXX_unrecognized     []byte           `json:"-"`
 	XXX_sizecache        int32            `json:"-"`
@@ -198,10 +196,14 @@ type isListener_ListenerType interface {
 }
 
 type Listener_HttpListener struct {
-	HttpListener *HttpListener `protobuf:"bytes,4,opt,name=http_listener,json=httpListener,proto3,oneof"`
+	HttpListener *HttpListener `protobuf:"bytes,4,opt,name=http_listener,json=httpListener,proto3,oneof" json:"http_listener,omitempty"`
+}
+type Listener_TcpListener struct {
+	TcpListener *TcpListener `protobuf:"bytes,5,opt,name=tcp_listener,json=tcpListener,proto3,oneof" json:"tcp_listener,omitempty"`
 }
 
 func (*Listener_HttpListener) isListener_ListenerType() {}
+func (*Listener_TcpListener) isListener_ListenerType()  {}
 
 func (m *Listener) GetListenerType() isListener_ListenerType {
 	if m != nil {
@@ -238,6 +240,13 @@ func (m *Listener) GetHttpListener() *HttpListener {
 	return nil
 }
 
+func (m *Listener) GetTcpListener() *TcpListener {
+	if x, ok := m.GetListenerType().(*Listener_TcpListener); ok {
+		return x.TcpListener
+	}
+	return nil
+}
+
 func (m *Listener) GetSslConfigurations() []*SslConfig {
 	if m != nil {
 		return m.SslConfigurations
@@ -252,59 +261,137 @@ func (m *Listener) GetUseProxyProto() *types.BoolValue {
 	return nil
 }
 
-// XXX_OneofFuncs is for the internal use of the proto package.
-func (*Listener) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
-	return _Listener_OneofMarshaler, _Listener_OneofUnmarshaler, _Listener_OneofSizer, []interface{}{
-		(*Listener_HttpListener)(nil),
-	}
-}
-
-func _Listener_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
-	m := msg.(*Listener)
-	// ListenerType
-	switch x := m.ListenerType.(type) {
-	case *Listener_HttpListener:
-		_ = b.EncodeVarint(4<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.HttpListener); err != nil {
-			return err
-		}
-	case nil:
-	default:
-		return fmt.Errorf("Listener.ListenerType has unexpected type %T", x)
+func (m *Listener) GetPlugins() *ListenerPlugins {
+	if m != nil {
+		return m.Plugins
 	}
 	return nil
 }
 
-func _Listener_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
-	m := msg.(*Listener)
-	switch tag {
-	case 4: // ListenerType.http_listener
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(HttpListener)
-		err := b.DecodeMessage(msg)
-		m.ListenerType = &Listener_HttpListener{msg}
-		return true, err
-	default:
-		return false, nil
+// XXX_OneofWrappers is for the internal use of the proto package.
+func (*Listener) XXX_OneofWrappers() []interface{} {
+	return []interface{}{
+		(*Listener_HttpListener)(nil),
+		(*Listener_TcpListener)(nil),
 	}
 }
 
-func _Listener_OneofSizer(msg proto.Message) (n int) {
-	m := msg.(*Listener)
-	// ListenerType
-	switch x := m.ListenerType.(type) {
-	case *Listener_HttpListener:
-		s := proto.Size(x.HttpListener)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
+type TcpListener struct {
+	// List of filter chains to match on for this listener
+	TcpHosts []*TcpHost `protobuf:"bytes,1,rep,name=tcp_hosts,json=tcpHosts,proto3" json:"tcp_hosts,omitempty"`
+	// Plugins contains top-level plugin configuration to be applied to a listener
+	// Listener config is applied to traffic for the given listener.
+	// Some configuration here can be overridden in
+	// Virtual Host Plugin configuration or Route Plugin configuration
+	Plugins *TcpListenerPlugins `protobuf:"bytes,8,opt,name=plugins,proto3" json:"plugins,omitempty"`
+	// prefix for addressing envoy stats for the tcp proxy
+	StatPrefix           string   `protobuf:"bytes,3,opt,name=stat_prefix,json=statPrefix,proto3" json:"stat_prefix,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *TcpListener) Reset()         { *m = TcpListener{} }
+func (m *TcpListener) String() string { return proto.CompactTextString(m) }
+func (*TcpListener) ProtoMessage()    {}
+func (*TcpListener) Descriptor() ([]byte, []int) {
+	return fileDescriptor_c6a47f72e9923590, []int{2}
+}
+func (m *TcpListener) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_TcpListener.Unmarshal(m, b)
+}
+func (m *TcpListener) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_TcpListener.Marshal(b, m, deterministic)
+}
+func (m *TcpListener) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_TcpListener.Merge(m, src)
+}
+func (m *TcpListener) XXX_Size() int {
+	return xxx_messageInfo_TcpListener.Size(m)
+}
+func (m *TcpListener) XXX_DiscardUnknown() {
+	xxx_messageInfo_TcpListener.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_TcpListener proto.InternalMessageInfo
+
+func (m *TcpListener) GetTcpHosts() []*TcpHost {
+	if m != nil {
+		return m.TcpHosts
 	}
-	return n
+	return nil
+}
+
+func (m *TcpListener) GetPlugins() *TcpListenerPlugins {
+	if m != nil {
+		return m.Plugins
+	}
+	return nil
+}
+
+func (m *TcpListener) GetStatPrefix() string {
+	if m != nil {
+		return m.StatPrefix
+	}
+	return ""
+}
+
+type TcpHost struct {
+	// the logical name of the tcp host. names must be unique for each tcp host within a listener
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Name of the destinations the gateway can route to.
+	// Note: the destination spec and subsets are not supported in this context and will be ignored.
+	Destination *RouteAction `protobuf:"bytes,2,opt,name=destination,proto3" json:"destination,omitempty"`
+	// If provided, the Gateway will serve TLS/SSL traffic for this set of routes
+	SslConfig            *SslConfig `protobuf:"bytes,3,opt,name=ssl_config,json=sslConfig,proto3" json:"ssl_config,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}   `json:"-"`
+	XXX_unrecognized     []byte     `json:"-"`
+	XXX_sizecache        int32      `json:"-"`
+}
+
+func (m *TcpHost) Reset()         { *m = TcpHost{} }
+func (m *TcpHost) String() string { return proto.CompactTextString(m) }
+func (*TcpHost) ProtoMessage()    {}
+func (*TcpHost) Descriptor() ([]byte, []int) {
+	return fileDescriptor_c6a47f72e9923590, []int{3}
+}
+func (m *TcpHost) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_TcpHost.Unmarshal(m, b)
+}
+func (m *TcpHost) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_TcpHost.Marshal(b, m, deterministic)
+}
+func (m *TcpHost) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_TcpHost.Merge(m, src)
+}
+func (m *TcpHost) XXX_Size() int {
+	return xxx_messageInfo_TcpHost.Size(m)
+}
+func (m *TcpHost) XXX_DiscardUnknown() {
+	xxx_messageInfo_TcpHost.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_TcpHost proto.InternalMessageInfo
+
+func (m *TcpHost) GetName() string {
+	if m != nil {
+		return m.Name
+	}
+	return ""
+}
+
+func (m *TcpHost) GetDestination() *RouteAction {
+	if m != nil {
+		return m.Destination
+	}
+	return nil
+}
+
+func (m *TcpHost) GetSslConfig() *SslConfig {
+	if m != nil {
+		return m.SslConfig
+	}
+	return nil
 }
 
 // Use this listener to configure proxy behavior for any HTTP-level features including defining routes (via virtual services).
@@ -315,21 +402,23 @@ type HttpListener struct {
 	// at least one virtual host must be specified for this listener to be active (else connections will be refused)
 	// the set of domains for each virtual host must be unique, or the config will be considered invalid
 	VirtualHosts []*VirtualHost `protobuf:"bytes,1,rep,name=virtual_hosts,json=virtualHosts,proto3" json:"virtual_hosts,omitempty"`
-	// Plugins contains top-level plugin configuration to be applied to a listener
-	// Listener config is applied to all HTTP traffic that
-	// connects to this listener. Some configuration here can be overridden in
+	// Listener Plugins contains top-level plugin configuration to be applied to a listener
+	// Listener config is applied to traffic for the given listener.
+	// Some configuration here can be overridden in
 	// Virtual Host Plugin configuration or Route Plugin configuration
-	ListenerPlugins      *ListenerPlugins `protobuf:"bytes,2,opt,name=listener_plugins,json=listenerPlugins,proto3" json:"listener_plugins,omitempty"`
-	XXX_NoUnkeyedLiteral struct{}         `json:"-"`
-	XXX_unrecognized     []byte           `json:"-"`
-	XXX_sizecache        int32            `json:"-"`
+	ListenerPlugins *HttpListenerPlugins `protobuf:"bytes,2,opt,name=listener_plugins,json=listenerPlugins,proto3" json:"listener_plugins,omitempty"`
+	// prefix for addressing envoy stats for the http connection manager
+	StatPrefix           string   `protobuf:"bytes,3,opt,name=stat_prefix,json=statPrefix,proto3" json:"stat_prefix,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
 }
 
 func (m *HttpListener) Reset()         { *m = HttpListener{} }
 func (m *HttpListener) String() string { return proto.CompactTextString(m) }
 func (*HttpListener) ProtoMessage()    {}
 func (*HttpListener) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{2}
+	return fileDescriptor_c6a47f72e9923590, []int{4}
 }
 func (m *HttpListener) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_HttpListener.Unmarshal(m, b)
@@ -356,11 +445,18 @@ func (m *HttpListener) GetVirtualHosts() []*VirtualHost {
 	return nil
 }
 
-func (m *HttpListener) GetListenerPlugins() *ListenerPlugins {
+func (m *HttpListener) GetListenerPlugins() *HttpListenerPlugins {
 	if m != nil {
 		return m.ListenerPlugins
 	}
 	return nil
+}
+
+func (m *HttpListener) GetStatPrefix() string {
+	if m != nil {
+		return m.StatPrefix
+	}
+	return ""
 }
 
 //
@@ -385,8 +481,10 @@ type VirtualHost struct {
 	// Virtual host plugins contain additional configuration to be applied to all traffic served by the Virtual Host.
 	// Some configuration here can be overridden by Route Plugins.
 	VirtualHostPlugins *VirtualHostPlugins `protobuf:"bytes,4,opt,name=virtual_host_plugins,json=virtualHostPlugins,proto3" json:"virtual_host_plugins,omitempty"`
-	// CorsPolicy defines Cross-Origin Resource Sharing for a virtual service.
-	CorsPolicy           *CorsPolicy `protobuf:"bytes,5,opt,name=cors_policy,json=corsPolicy,proto3" json:"cors_policy,omitempty"`
+	// Defines a CORS policy for the virtual host
+	// If a CORS policy is also defined on the route matched by the request, the policies are merged.
+	// DEPRECATED set cors policy through the Virtual Host Plugin
+	CorsPolicy           *CorsPolicy `protobuf:"bytes,5,opt,name=cors_policy,json=corsPolicy,proto3" json:"cors_policy,omitempty"` // Deprecated: Do not use.
 	XXX_NoUnkeyedLiteral struct{}    `json:"-"`
 	XXX_unrecognized     []byte      `json:"-"`
 	XXX_sizecache        int32       `json:"-"`
@@ -396,7 +494,7 @@ func (m *VirtualHost) Reset()         { *m = VirtualHost{} }
 func (m *VirtualHost) String() string { return proto.CompactTextString(m) }
 func (*VirtualHost) ProtoMessage()    {}
 func (*VirtualHost) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{3}
+	return fileDescriptor_c6a47f72e9923590, []int{5}
 }
 func (m *VirtualHost) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_VirtualHost.Unmarshal(m, b)
@@ -444,6 +542,7 @@ func (m *VirtualHost) GetVirtualHostPlugins() *VirtualHostPlugins {
 	return nil
 }
 
+// Deprecated: Do not use.
 func (m *VirtualHost) GetCorsPolicy() *CorsPolicy {
 	if m != nil {
 		return m.CorsPolicy
@@ -465,7 +564,12 @@ type Route struct {
 	Action isRoute_Action `protobuf_oneof:"action"`
 	// Route Plugins extend the behavior of routes.
 	// Route plugins include configuration such as retries,rate limiting, and request/response transformation.
-	RoutePlugins         *RoutePlugins `protobuf:"bytes,5,opt,name=route_plugins,json=routePlugins,proto3" json:"route_plugins,omitempty"`
+	RoutePlugins *RoutePlugins `protobuf:"bytes,5,opt,name=route_plugins,json=routePlugins,proto3" json:"route_plugins,omitempty"`
+	// Metadata for the individual route
+	// This data is opaque to Gloo, used
+	// by controllers to track ownership of routes within a proxy
+	// as they are typically generated by a controller (such as the gateway)
+	RouteMetadata        *types.Struct `protobuf:"bytes,6,opt,name=route_metadata,json=routeMetadata,proto3" json:"route_metadata,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}      `json:"-"`
 	XXX_unrecognized     []byte        `json:"-"`
 	XXX_sizecache        int32         `json:"-"`
@@ -475,7 +579,7 @@ func (m *Route) Reset()         { *m = Route{} }
 func (m *Route) String() string { return proto.CompactTextString(m) }
 func (*Route) ProtoMessage()    {}
 func (*Route) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{4}
+	return fileDescriptor_c6a47f72e9923590, []int{6}
 }
 func (m *Route) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_Route.Unmarshal(m, b)
@@ -501,13 +605,13 @@ type isRoute_Action interface {
 }
 
 type Route_RouteAction struct {
-	RouteAction *RouteAction `protobuf:"bytes,2,opt,name=route_action,json=routeAction,proto3,oneof"`
+	RouteAction *RouteAction `protobuf:"bytes,2,opt,name=route_action,json=routeAction,proto3,oneof" json:"route_action,omitempty"`
 }
 type Route_RedirectAction struct {
-	RedirectAction *RedirectAction `protobuf:"bytes,3,opt,name=redirect_action,json=redirectAction,proto3,oneof"`
+	RedirectAction *RedirectAction `protobuf:"bytes,3,opt,name=redirect_action,json=redirectAction,proto3,oneof" json:"redirect_action,omitempty"`
 }
 type Route_DirectResponseAction struct {
-	DirectResponseAction *DirectResponseAction `protobuf:"bytes,4,opt,name=direct_response_action,json=directResponseAction,proto3,oneof"`
+	DirectResponseAction *DirectResponseAction `protobuf:"bytes,4,opt,name=direct_response_action,json=directResponseAction,proto3,oneof" json:"direct_response_action,omitempty"`
 }
 
 func (*Route_RouteAction) isRoute_Action()          {}
@@ -556,97 +660,20 @@ func (m *Route) GetRoutePlugins() *RoutePlugins {
 	return nil
 }
 
-// XXX_OneofFuncs is for the internal use of the proto package.
-func (*Route) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
-	return _Route_OneofMarshaler, _Route_OneofUnmarshaler, _Route_OneofSizer, []interface{}{
-		(*Route_RouteAction)(nil),
-		(*Route_RedirectAction)(nil),
-		(*Route_DirectResponseAction)(nil),
-	}
-}
-
-func _Route_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
-	m := msg.(*Route)
-	// action
-	switch x := m.Action.(type) {
-	case *Route_RouteAction:
-		_ = b.EncodeVarint(2<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.RouteAction); err != nil {
-			return err
-		}
-	case *Route_RedirectAction:
-		_ = b.EncodeVarint(3<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.RedirectAction); err != nil {
-			return err
-		}
-	case *Route_DirectResponseAction:
-		_ = b.EncodeVarint(4<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.DirectResponseAction); err != nil {
-			return err
-		}
-	case nil:
-	default:
-		return fmt.Errorf("Route.Action has unexpected type %T", x)
+func (m *Route) GetRouteMetadata() *types.Struct {
+	if m != nil {
+		return m.RouteMetadata
 	}
 	return nil
 }
 
-func _Route_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
-	m := msg.(*Route)
-	switch tag {
-	case 2: // action.route_action
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(RouteAction)
-		err := b.DecodeMessage(msg)
-		m.Action = &Route_RouteAction{msg}
-		return true, err
-	case 3: // action.redirect_action
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(RedirectAction)
-		err := b.DecodeMessage(msg)
-		m.Action = &Route_RedirectAction{msg}
-		return true, err
-	case 4: // action.direct_response_action
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(DirectResponseAction)
-		err := b.DecodeMessage(msg)
-		m.Action = &Route_DirectResponseAction{msg}
-		return true, err
-	default:
-		return false, nil
+// XXX_OneofWrappers is for the internal use of the proto package.
+func (*Route) XXX_OneofWrappers() []interface{} {
+	return []interface{}{
+		(*Route_RouteAction)(nil),
+		(*Route_RedirectAction)(nil),
+		(*Route_DirectResponseAction)(nil),
 	}
-}
-
-func _Route_OneofSizer(msg proto.Message) (n int) {
-	m := msg.(*Route)
-	// action
-	switch x := m.Action.(type) {
-	case *Route_RouteAction:
-		s := proto.Size(x.RouteAction)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Route_RedirectAction:
-		s := proto.Size(x.RedirectAction)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Route_DirectResponseAction:
-		s := proto.Size(x.DirectResponseAction)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
-	}
-	return n
 }
 
 // Parameters for matching routes to requests received by a Gloo-managed proxy
@@ -679,7 +706,7 @@ func (m *Matcher) Reset()         { *m = Matcher{} }
 func (m *Matcher) String() string { return proto.CompactTextString(m) }
 func (*Matcher) ProtoMessage()    {}
 func (*Matcher) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{5}
+	return fileDescriptor_c6a47f72e9923590, []int{7}
 }
 func (m *Matcher) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_Matcher.Unmarshal(m, b)
@@ -705,13 +732,13 @@ type isMatcher_PathSpecifier interface {
 }
 
 type Matcher_Prefix struct {
-	Prefix string `protobuf:"bytes,1,opt,name=prefix,proto3,oneof"`
+	Prefix string `protobuf:"bytes,1,opt,name=prefix,proto3,oneof" json:"prefix,omitempty"`
 }
 type Matcher_Exact struct {
-	Exact string `protobuf:"bytes,2,opt,name=exact,proto3,oneof"`
+	Exact string `protobuf:"bytes,2,opt,name=exact,proto3,oneof" json:"exact,omitempty"`
 }
 type Matcher_Regex struct {
-	Regex string `protobuf:"bytes,3,opt,name=regex,proto3,oneof"`
+	Regex string `protobuf:"bytes,3,opt,name=regex,proto3,oneof" json:"regex,omitempty"`
 }
 
 func (*Matcher_Prefix) isMatcher_PathSpecifier() {}
@@ -767,93 +794,17 @@ func (m *Matcher) GetMethods() []string {
 	return nil
 }
 
-// XXX_OneofFuncs is for the internal use of the proto package.
-func (*Matcher) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
-	return _Matcher_OneofMarshaler, _Matcher_OneofUnmarshaler, _Matcher_OneofSizer, []interface{}{
+// XXX_OneofWrappers is for the internal use of the proto package.
+func (*Matcher) XXX_OneofWrappers() []interface{} {
+	return []interface{}{
 		(*Matcher_Prefix)(nil),
 		(*Matcher_Exact)(nil),
 		(*Matcher_Regex)(nil),
 	}
 }
 
-func _Matcher_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
-	m := msg.(*Matcher)
-	// path_specifier
-	switch x := m.PathSpecifier.(type) {
-	case *Matcher_Prefix:
-		_ = b.EncodeVarint(1<<3 | proto.WireBytes)
-		_ = b.EncodeStringBytes(x.Prefix)
-	case *Matcher_Exact:
-		_ = b.EncodeVarint(2<<3 | proto.WireBytes)
-		_ = b.EncodeStringBytes(x.Exact)
-	case *Matcher_Regex:
-		_ = b.EncodeVarint(3<<3 | proto.WireBytes)
-		_ = b.EncodeStringBytes(x.Regex)
-	case nil:
-	default:
-		return fmt.Errorf("Matcher.PathSpecifier has unexpected type %T", x)
-	}
-	return nil
-}
-
-func _Matcher_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
-	m := msg.(*Matcher)
-	switch tag {
-	case 1: // path_specifier.prefix
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		x, err := b.DecodeStringBytes()
-		m.PathSpecifier = &Matcher_Prefix{x}
-		return true, err
-	case 2: // path_specifier.exact
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		x, err := b.DecodeStringBytes()
-		m.PathSpecifier = &Matcher_Exact{x}
-		return true, err
-	case 3: // path_specifier.regex
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		x, err := b.DecodeStringBytes()
-		m.PathSpecifier = &Matcher_Regex{x}
-		return true, err
-	default:
-		return false, nil
-	}
-}
-
-func _Matcher_OneofSizer(msg proto.Message) (n int) {
-	m := msg.(*Matcher)
-	// path_specifier
-	switch x := m.PathSpecifier.(type) {
-	case *Matcher_Prefix:
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(len(x.Prefix)))
-		n += len(x.Prefix)
-	case *Matcher_Exact:
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(len(x.Exact)))
-		n += len(x.Exact)
-	case *Matcher_Regex:
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(len(x.Regex)))
-		n += len(x.Regex)
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
-	}
-	return n
-}
-
-//   Internally, Gloo always uses the HTTP/2 *:authority* header to represent the HTTP/1 *Host*
-//   header. Thus, if attempting to match on *Host*, match on *:authority* instead.
-//
-//   In the absence of any header match specifier, match will default to `present_match`
-//   i.e, a request that has the `name` header will match, regardless of the header's
-//   value.
+// Internally, Gloo always uses the HTTP/2 *:authority* header to represent the HTTP/1 *Host* header.
+// Thus, if attempting to match on *Host*, match on *:authority* instead.
 type HeaderMatcher struct {
 	// Specifies the name of the header in the request.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -861,7 +812,14 @@ type HeaderMatcher struct {
 	// has the name header will match, regardless of the header’s value.
 	Value string `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
 	// Specifies whether the header value should be treated as regex or not.
-	Regex                bool     `protobuf:"varint,3,opt,name=regex,proto3" json:"regex,omitempty"`
+	Regex bool `protobuf:"varint,3,opt,name=regex,proto3" json:"regex,omitempty"`
+	// If set to true, the result of the match will be inverted. Defaults to false.
+	//
+	// Examples:
+	// * name=foo, invert_match=true: matches if no header named `foo` is present
+	// * name=foo, value=bar, invert_match=true: matches if no header named `foo` with value `bar` is present
+	// * name=foo, value=``\d{3}``, regex=true, invert_match=true: matches if no header named `foo` with a value consisting of three integers is present
+	InvertMatch          bool     `protobuf:"varint,4,opt,name=invert_match,json=invertMatch,proto3" json:"invert_match,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
@@ -871,7 +829,7 @@ func (m *HeaderMatcher) Reset()         { *m = HeaderMatcher{} }
 func (m *HeaderMatcher) String() string { return proto.CompactTextString(m) }
 func (*HeaderMatcher) ProtoMessage()    {}
 func (*HeaderMatcher) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{6}
+	return fileDescriptor_c6a47f72e9923590, []int{8}
 }
 func (m *HeaderMatcher) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_HeaderMatcher.Unmarshal(m, b)
@@ -912,6 +870,13 @@ func (m *HeaderMatcher) GetRegex() bool {
 	return false
 }
 
+func (m *HeaderMatcher) GetInvertMatch() bool {
+	if m != nil {
+		return m.InvertMatch
+	}
+	return false
+}
+
 // Query parameter matching treats the query string of a request's :path header
 // as an ampersand-separated list of keys and/or key=value elements.
 type QueryParameterMatcher struct {
@@ -936,7 +901,7 @@ func (m *QueryParameterMatcher) Reset()         { *m = QueryParameterMatcher{} }
 func (m *QueryParameterMatcher) String() string { return proto.CompactTextString(m) }
 func (*QueryParameterMatcher) ProtoMessage()    {}
 func (*QueryParameterMatcher) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{7}
+	return fileDescriptor_c6a47f72e9923590, []int{9}
 }
 func (m *QueryParameterMatcher) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_QueryParameterMatcher.Unmarshal(m, b)
@@ -997,7 +962,7 @@ func (m *RouteAction) Reset()         { *m = RouteAction{} }
 func (m *RouteAction) String() string { return proto.CompactTextString(m) }
 func (*RouteAction) ProtoMessage()    {}
 func (*RouteAction) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{8}
+	return fileDescriptor_c6a47f72e9923590, []int{10}
 }
 func (m *RouteAction) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_RouteAction.Unmarshal(m, b)
@@ -1023,13 +988,13 @@ type isRouteAction_Destination interface {
 }
 
 type RouteAction_Single struct {
-	Single *Destination `protobuf:"bytes,1,opt,name=single,proto3,oneof"`
+	Single *Destination `protobuf:"bytes,1,opt,name=single,proto3,oneof" json:"single,omitempty"`
 }
 type RouteAction_Multi struct {
-	Multi *MultiDestination `protobuf:"bytes,2,opt,name=multi,proto3,oneof"`
+	Multi *MultiDestination `protobuf:"bytes,2,opt,name=multi,proto3,oneof" json:"multi,omitempty"`
 }
 type RouteAction_UpstreamGroup struct {
-	UpstreamGroup *core.ResourceRef `protobuf:"bytes,3,opt,name=upstream_group,json=upstreamGroup,proto3,oneof"`
+	UpstreamGroup *core.ResourceRef `protobuf:"bytes,3,opt,name=upstream_group,json=upstreamGroup,proto3,oneof" json:"upstream_group,omitempty"`
 }
 
 func (*RouteAction_Single) isRouteAction_Destination()        {}
@@ -1064,97 +1029,13 @@ func (m *RouteAction) GetUpstreamGroup() *core.ResourceRef {
 	return nil
 }
 
-// XXX_OneofFuncs is for the internal use of the proto package.
-func (*RouteAction) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
-	return _RouteAction_OneofMarshaler, _RouteAction_OneofUnmarshaler, _RouteAction_OneofSizer, []interface{}{
+// XXX_OneofWrappers is for the internal use of the proto package.
+func (*RouteAction) XXX_OneofWrappers() []interface{} {
+	return []interface{}{
 		(*RouteAction_Single)(nil),
 		(*RouteAction_Multi)(nil),
 		(*RouteAction_UpstreamGroup)(nil),
 	}
-}
-
-func _RouteAction_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
-	m := msg.(*RouteAction)
-	// destination
-	switch x := m.Destination.(type) {
-	case *RouteAction_Single:
-		_ = b.EncodeVarint(1<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Single); err != nil {
-			return err
-		}
-	case *RouteAction_Multi:
-		_ = b.EncodeVarint(2<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Multi); err != nil {
-			return err
-		}
-	case *RouteAction_UpstreamGroup:
-		_ = b.EncodeVarint(3<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.UpstreamGroup); err != nil {
-			return err
-		}
-	case nil:
-	default:
-		return fmt.Errorf("RouteAction.Destination has unexpected type %T", x)
-	}
-	return nil
-}
-
-func _RouteAction_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
-	m := msg.(*RouteAction)
-	switch tag {
-	case 1: // destination.single
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(Destination)
-		err := b.DecodeMessage(msg)
-		m.Destination = &RouteAction_Single{msg}
-		return true, err
-	case 2: // destination.multi
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(MultiDestination)
-		err := b.DecodeMessage(msg)
-		m.Destination = &RouteAction_Multi{msg}
-		return true, err
-	case 3: // destination.upstream_group
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(core.ResourceRef)
-		err := b.DecodeMessage(msg)
-		m.Destination = &RouteAction_UpstreamGroup{msg}
-		return true, err
-	default:
-		return false, nil
-	}
-}
-
-func _RouteAction_OneofSizer(msg proto.Message) (n int) {
-	m := msg.(*RouteAction)
-	// destination
-	switch x := m.Destination.(type) {
-	case *RouteAction_Single:
-		s := proto.Size(x.Single)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *RouteAction_Multi:
-		s := proto.Size(x.Multi)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *RouteAction_UpstreamGroup:
-		s := proto.Size(x.UpstreamGroup)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
-	}
-	return n
 }
 
 // Destinations define routable destinations for proxied requests.
@@ -1163,7 +1044,8 @@ type Destination struct {
 	//
 	// Types that are valid to be assigned to DestinationType:
 	//	*Destination_Upstream
-	//	*Destination_Service
+	//	*Destination_Kube
+	//	*Destination_Consul
 	DestinationType isDestination_DestinationType `protobuf_oneof:"destination_type"`
 	// Some upstreams utilize plugins which require or permit additional configuration on routes targeting them.
 	// gRPC upstreams, for example, allow specifying REST-style parameters for JSON-to-gRPC transcoding in the
@@ -1182,7 +1064,7 @@ func (m *Destination) Reset()         { *m = Destination{} }
 func (m *Destination) String() string { return proto.CompactTextString(m) }
 func (*Destination) ProtoMessage()    {}
 func (*Destination) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{9}
+	return fileDescriptor_c6a47f72e9923590, []int{11}
 }
 func (m *Destination) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_Destination.Unmarshal(m, b)
@@ -1208,14 +1090,18 @@ type isDestination_DestinationType interface {
 }
 
 type Destination_Upstream struct {
-	Upstream *core.ResourceRef `protobuf:"bytes,10,opt,name=upstream,proto3,oneof"`
+	Upstream *core.ResourceRef `protobuf:"bytes,10,opt,name=upstream,proto3,oneof" json:"upstream,omitempty"`
 }
-type Destination_Service struct {
-	Service *ServiceDestination `protobuf:"bytes,11,opt,name=service,proto3,oneof"`
+type Destination_Kube struct {
+	Kube *KubernetesServiceDestination `protobuf:"bytes,11,opt,name=kube,proto3,oneof" json:"kube,omitempty"`
+}
+type Destination_Consul struct {
+	Consul *ConsulServiceDestination `protobuf:"bytes,12,opt,name=consul,proto3,oneof" json:"consul,omitempty"`
 }
 
 func (*Destination_Upstream) isDestination_DestinationType() {}
-func (*Destination_Service) isDestination_DestinationType()  {}
+func (*Destination_Kube) isDestination_DestinationType()     {}
+func (*Destination_Consul) isDestination_DestinationType()   {}
 
 func (m *Destination) GetDestinationType() isDestination_DestinationType {
 	if m != nil {
@@ -1231,9 +1117,16 @@ func (m *Destination) GetUpstream() *core.ResourceRef {
 	return nil
 }
 
-func (m *Destination) GetService() *ServiceDestination {
-	if x, ok := m.GetDestinationType().(*Destination_Service); ok {
-		return x.Service
+func (m *Destination) GetKube() *KubernetesServiceDestination {
+	if x, ok := m.GetDestinationType().(*Destination_Kube); ok {
+		return x.Kube
+	}
+	return nil
+}
+
+func (m *Destination) GetConsul() *ConsulServiceDestination {
+	if x, ok := m.GetDestinationType().(*Destination_Consul); ok {
+		return x.Consul
 	}
 	return nil
 }
@@ -1252,82 +1145,17 @@ func (m *Destination) GetSubset() *Subset {
 	return nil
 }
 
-// XXX_OneofFuncs is for the internal use of the proto package.
-func (*Destination) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
-	return _Destination_OneofMarshaler, _Destination_OneofUnmarshaler, _Destination_OneofSizer, []interface{}{
+// XXX_OneofWrappers is for the internal use of the proto package.
+func (*Destination) XXX_OneofWrappers() []interface{} {
+	return []interface{}{
 		(*Destination_Upstream)(nil),
-		(*Destination_Service)(nil),
+		(*Destination_Kube)(nil),
+		(*Destination_Consul)(nil),
 	}
-}
-
-func _Destination_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
-	m := msg.(*Destination)
-	// destination_type
-	switch x := m.DestinationType.(type) {
-	case *Destination_Upstream:
-		_ = b.EncodeVarint(10<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Upstream); err != nil {
-			return err
-		}
-	case *Destination_Service:
-		_ = b.EncodeVarint(11<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Service); err != nil {
-			return err
-		}
-	case nil:
-	default:
-		return fmt.Errorf("Destination.DestinationType has unexpected type %T", x)
-	}
-	return nil
-}
-
-func _Destination_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
-	m := msg.(*Destination)
-	switch tag {
-	case 10: // destination_type.upstream
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(core.ResourceRef)
-		err := b.DecodeMessage(msg)
-		m.DestinationType = &Destination_Upstream{msg}
-		return true, err
-	case 11: // destination_type.service
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(ServiceDestination)
-		err := b.DecodeMessage(msg)
-		m.DestinationType = &Destination_Service{msg}
-		return true, err
-	default:
-		return false, nil
-	}
-}
-
-func _Destination_OneofSizer(msg proto.Message) (n int) {
-	m := msg.(*Destination)
-	// destination_type
-	switch x := m.DestinationType.(type) {
-	case *Destination_Upstream:
-		s := proto.Size(x.Upstream)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Destination_Service:
-		s := proto.Size(x.Service)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
-	}
-	return n
 }
 
 // Identifies a port on a kubernetes service to route traffic to.
-type ServiceDestination struct {
+type KubernetesServiceDestination struct {
 	// The target service
 	Ref core.ResourceRef `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref"`
 	// The port attribute of the service
@@ -1337,47 +1165,107 @@ type ServiceDestination struct {
 	XXX_sizecache        int32    `json:"-"`
 }
 
-func (m *ServiceDestination) Reset()         { *m = ServiceDestination{} }
-func (m *ServiceDestination) String() string { return proto.CompactTextString(m) }
-func (*ServiceDestination) ProtoMessage()    {}
-func (*ServiceDestination) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{10}
+func (m *KubernetesServiceDestination) Reset()         { *m = KubernetesServiceDestination{} }
+func (m *KubernetesServiceDestination) String() string { return proto.CompactTextString(m) }
+func (*KubernetesServiceDestination) ProtoMessage()    {}
+func (*KubernetesServiceDestination) Descriptor() ([]byte, []int) {
+	return fileDescriptor_c6a47f72e9923590, []int{12}
 }
-func (m *ServiceDestination) XXX_Unmarshal(b []byte) error {
-	return xxx_messageInfo_ServiceDestination.Unmarshal(m, b)
+func (m *KubernetesServiceDestination) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_KubernetesServiceDestination.Unmarshal(m, b)
 }
-func (m *ServiceDestination) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	return xxx_messageInfo_ServiceDestination.Marshal(b, m, deterministic)
+func (m *KubernetesServiceDestination) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_KubernetesServiceDestination.Marshal(b, m, deterministic)
 }
-func (m *ServiceDestination) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_ServiceDestination.Merge(m, src)
+func (m *KubernetesServiceDestination) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_KubernetesServiceDestination.Merge(m, src)
 }
-func (m *ServiceDestination) XXX_Size() int {
-	return xxx_messageInfo_ServiceDestination.Size(m)
+func (m *KubernetesServiceDestination) XXX_Size() int {
+	return xxx_messageInfo_KubernetesServiceDestination.Size(m)
 }
-func (m *ServiceDestination) XXX_DiscardUnknown() {
-	xxx_messageInfo_ServiceDestination.DiscardUnknown(m)
+func (m *KubernetesServiceDestination) XXX_DiscardUnknown() {
+	xxx_messageInfo_KubernetesServiceDestination.DiscardUnknown(m)
 }
 
-var xxx_messageInfo_ServiceDestination proto.InternalMessageInfo
+var xxx_messageInfo_KubernetesServiceDestination proto.InternalMessageInfo
 
-func (m *ServiceDestination) GetRef() core.ResourceRef {
+func (m *KubernetesServiceDestination) GetRef() core.ResourceRef {
 	if m != nil {
 		return m.Ref
 	}
 	return core.ResourceRef{}
 }
 
-func (m *ServiceDestination) GetPort() uint32 {
+func (m *KubernetesServiceDestination) GetPort() uint32 {
 	if m != nil {
 		return m.Port
 	}
 	return 0
 }
 
-//
-//@solo-kit:resource.short_name=ug
-//@solo-kit:resource.plural_name=upstreamgroups
+// Identifies a [Consul](https://www.consul.io/) [service](https://www.consul.io/docs/agent/services.html) to route traffic to.
+// Multiple Consul services with the same name can present distinct sets of tags, listen of different ports, and live in
+// multiple data centers (see an example [here](https://www.consul.io/docs/agent/services.html#multiple-service-definitions)).
+// You can target the desired subset of services via the fields in this configuration. Gloo will detect the correspondent
+// IP addresses and ports and load balance traffic between them.
+type ConsulServiceDestination struct {
+	// The name of the target service. This field is required.
+	ServiceName string `protobuf:"bytes,1,opt,name=service_name,json=serviceName,proto3" json:"service_name,omitempty"`
+	// If provided, load balance traffic only between services matching all the given tags.
+	Tags []string `protobuf:"bytes,2,rep,name=tags,proto3" json:"tags,omitempty"`
+	// If provided, load balance traffic only between services running in the given
+	// [data centers](https://www.consul.io/docs/internals/architecture.html).
+	DataCenters          []string `protobuf:"bytes,3,rep,name=data_centers,json=dataCenters,proto3" json:"data_centers,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *ConsulServiceDestination) Reset()         { *m = ConsulServiceDestination{} }
+func (m *ConsulServiceDestination) String() string { return proto.CompactTextString(m) }
+func (*ConsulServiceDestination) ProtoMessage()    {}
+func (*ConsulServiceDestination) Descriptor() ([]byte, []int) {
+	return fileDescriptor_c6a47f72e9923590, []int{13}
+}
+func (m *ConsulServiceDestination) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_ConsulServiceDestination.Unmarshal(m, b)
+}
+func (m *ConsulServiceDestination) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_ConsulServiceDestination.Marshal(b, m, deterministic)
+}
+func (m *ConsulServiceDestination) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ConsulServiceDestination.Merge(m, src)
+}
+func (m *ConsulServiceDestination) XXX_Size() int {
+	return xxx_messageInfo_ConsulServiceDestination.Size(m)
+}
+func (m *ConsulServiceDestination) XXX_DiscardUnknown() {
+	xxx_messageInfo_ConsulServiceDestination.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ConsulServiceDestination proto.InternalMessageInfo
+
+func (m *ConsulServiceDestination) GetServiceName() string {
+	if m != nil {
+		return m.ServiceName
+	}
+	return ""
+}
+
+func (m *ConsulServiceDestination) GetTags() []string {
+	if m != nil {
+		return m.Tags
+	}
+	return nil
+}
+
+func (m *ConsulServiceDestination) GetDataCenters() []string {
+	if m != nil {
+		return m.DataCenters
+	}
+	return nil
+}
+
 type UpstreamGroup struct {
 	// The destinations that are part of this upstream group.
 	Destinations []*WeightedDestination `protobuf:"bytes,1,rep,name=destinations,proto3" json:"destinations,omitempty"`
@@ -1395,7 +1283,7 @@ func (m *UpstreamGroup) Reset()         { *m = UpstreamGroup{} }
 func (m *UpstreamGroup) String() string { return proto.CompactTextString(m) }
 func (*UpstreamGroup) ProtoMessage()    {}
 func (*UpstreamGroup) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{11}
+	return fileDescriptor_c6a47f72e9923590, []int{14}
 }
 func (m *UpstreamGroup) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_UpstreamGroup.Unmarshal(m, b)
@@ -1451,7 +1339,7 @@ func (m *MultiDestination) Reset()         { *m = MultiDestination{} }
 func (m *MultiDestination) String() string { return proto.CompactTextString(m) }
 func (*MultiDestination) ProtoMessage()    {}
 func (*MultiDestination) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{12}
+	return fileDescriptor_c6a47f72e9923590, []int{15}
 }
 func (m *MultiDestination) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_MultiDestination.Unmarshal(m, b)
@@ -1483,17 +1371,22 @@ type WeightedDestination struct {
 	Destination *Destination `protobuf:"bytes,1,opt,name=destination,proto3" json:"destination,omitempty"`
 	// Weight must be greater than zero
 	// Routing to each destination will be balanced by the ratio of the destination's weight to the total weight on a route
-	Weight               uint32   `protobuf:"varint,2,opt,name=weight,proto3" json:"weight,omitempty"`
-	XXX_NoUnkeyedLiteral struct{} `json:"-"`
-	XXX_unrecognized     []byte   `json:"-"`
-	XXX_sizecache        int32    `json:"-"`
+	Weight uint32 `protobuf:"varint,2,opt,name=weight,proto3" json:"weight,omitempty"`
+	//Deprecated: use weighted_destination_plugins
+	// Apply configuration to traffic that is sent to this weighted destination
+	WeighedDestinationPlugins *WeightedDestinationPlugins `protobuf:"bytes,3,opt,name=weighed_destination_plugins,json=weighedDestinationPlugins,proto3" json:"weighed_destination_plugins,omitempty"` // Deprecated: Do not use.
+	// Apply configuration to traffic that is sent to this weighted destination
+	WeightedDestinationPlugins *WeightedDestinationPlugins `protobuf:"bytes,4,opt,name=weighted_destination_plugins,json=weightedDestinationPlugins,proto3" json:"weighted_destination_plugins,omitempty"`
+	XXX_NoUnkeyedLiteral       struct{}                    `json:"-"`
+	XXX_unrecognized           []byte                      `json:"-"`
+	XXX_sizecache              int32                       `json:"-"`
 }
 
 func (m *WeightedDestination) Reset()         { *m = WeightedDestination{} }
 func (m *WeightedDestination) String() string { return proto.CompactTextString(m) }
 func (*WeightedDestination) ProtoMessage()    {}
 func (*WeightedDestination) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{13}
+	return fileDescriptor_c6a47f72e9923590, []int{16}
 }
 func (m *WeightedDestination) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_WeightedDestination.Unmarshal(m, b)
@@ -1527,7 +1420,21 @@ func (m *WeightedDestination) GetWeight() uint32 {
 	return 0
 }
 
-// TODO(ilackarms): evaluate how much to differentiate (or if even to include) RedirectAction
+// Deprecated: Do not use.
+func (m *WeightedDestination) GetWeighedDestinationPlugins() *WeightedDestinationPlugins {
+	if m != nil {
+		return m.WeighedDestinationPlugins
+	}
+	return nil
+}
+
+func (m *WeightedDestination) GetWeightedDestinationPlugins() *WeightedDestinationPlugins {
+	if m != nil {
+		return m.WeightedDestinationPlugins
+	}
+	return nil
+}
+
 // Notice: RedirectAction is copied directly from https://github.com/envoyproxy/envoy/blob/master/api/envoy/api/v2/route/route.proto
 type RedirectAction struct {
 	// The host portion of the URL will be swapped with this value.
@@ -1553,7 +1460,7 @@ func (m *RedirectAction) Reset()         { *m = RedirectAction{} }
 func (m *RedirectAction) String() string { return proto.CompactTextString(m) }
 func (*RedirectAction) ProtoMessage()    {}
 func (*RedirectAction) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{14}
+	return fileDescriptor_c6a47f72e9923590, []int{17}
 }
 func (m *RedirectAction) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_RedirectAction.Unmarshal(m, b)
@@ -1579,10 +1486,10 @@ type isRedirectAction_PathRewriteSpecifier interface {
 }
 
 type RedirectAction_PathRedirect struct {
-	PathRedirect string `protobuf:"bytes,2,opt,name=path_redirect,json=pathRedirect,proto3,oneof"`
+	PathRedirect string `protobuf:"bytes,2,opt,name=path_redirect,json=pathRedirect,proto3,oneof" json:"path_redirect,omitempty"`
 }
 type RedirectAction_PrefixRewrite struct {
-	PrefixRewrite string `protobuf:"bytes,5,opt,name=prefix_rewrite,json=prefixRewrite,proto3,oneof"`
+	PrefixRewrite string `protobuf:"bytes,5,opt,name=prefix_rewrite,json=prefixRewrite,proto3,oneof" json:"prefix_rewrite,omitempty"`
 }
 
 func (*RedirectAction_PathRedirect) isRedirectAction_PathRewriteSpecifier()  {}
@@ -1637,73 +1544,14 @@ func (m *RedirectAction) GetStripQuery() bool {
 	return false
 }
 
-// XXX_OneofFuncs is for the internal use of the proto package.
-func (*RedirectAction) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
-	return _RedirectAction_OneofMarshaler, _RedirectAction_OneofUnmarshaler, _RedirectAction_OneofSizer, []interface{}{
+// XXX_OneofWrappers is for the internal use of the proto package.
+func (*RedirectAction) XXX_OneofWrappers() []interface{} {
+	return []interface{}{
 		(*RedirectAction_PathRedirect)(nil),
 		(*RedirectAction_PrefixRewrite)(nil),
 	}
 }
 
-func _RedirectAction_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
-	m := msg.(*RedirectAction)
-	// path_rewrite_specifier
-	switch x := m.PathRewriteSpecifier.(type) {
-	case *RedirectAction_PathRedirect:
-		_ = b.EncodeVarint(2<<3 | proto.WireBytes)
-		_ = b.EncodeStringBytes(x.PathRedirect)
-	case *RedirectAction_PrefixRewrite:
-		_ = b.EncodeVarint(5<<3 | proto.WireBytes)
-		_ = b.EncodeStringBytes(x.PrefixRewrite)
-	case nil:
-	default:
-		return fmt.Errorf("RedirectAction.PathRewriteSpecifier has unexpected type %T", x)
-	}
-	return nil
-}
-
-func _RedirectAction_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
-	m := msg.(*RedirectAction)
-	switch tag {
-	case 2: // path_rewrite_specifier.path_redirect
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		x, err := b.DecodeStringBytes()
-		m.PathRewriteSpecifier = &RedirectAction_PathRedirect{x}
-		return true, err
-	case 5: // path_rewrite_specifier.prefix_rewrite
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		x, err := b.DecodeStringBytes()
-		m.PathRewriteSpecifier = &RedirectAction_PrefixRewrite{x}
-		return true, err
-	default:
-		return false, nil
-	}
-}
-
-func _RedirectAction_OneofSizer(msg proto.Message) (n int) {
-	m := msg.(*RedirectAction)
-	// path_rewrite_specifier
-	switch x := m.PathRewriteSpecifier.(type) {
-	case *RedirectAction_PathRedirect:
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(len(x.PathRedirect)))
-		n += len(x.PathRedirect)
-	case *RedirectAction_PrefixRewrite:
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(len(x.PrefixRewrite)))
-		n += len(x.PrefixRewrite)
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
-	}
-	return n
-}
-
-// TODO(ilackarms): evaluate how much to differentiate (or if even to include) DirectResponseAction
 // DirectResponseAction is copied directly from https://github.com/envoyproxy/envoy/blob/master/api/envoy/api/v2/route/route.proto
 type DirectResponseAction struct {
 	// Specifies the HTTP response status to be returned.
@@ -1723,7 +1571,7 @@ func (m *DirectResponseAction) Reset()         { *m = DirectResponseAction{} }
 func (m *DirectResponseAction) String() string { return proto.CompactTextString(m) }
 func (*DirectResponseAction) ProtoMessage()    {}
 func (*DirectResponseAction) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{15}
+	return fileDescriptor_c6a47f72e9923590, []int{18}
 }
 func (m *DirectResponseAction) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_DirectResponseAction.Unmarshal(m, b)
@@ -1758,6 +1606,9 @@ func (m *DirectResponseAction) GetBody() string {
 }
 
 // CorsPolicy defines Cross-Origin Resource Sharing for a virtual service.
+// DEPRECATED set cors policy through the Virtual Host Plugin
+//
+// Deprecated: Do not use.
 type CorsPolicy struct {
 	// Specifies the origins that will be allowed to make CORS requests.
 	//
@@ -1787,7 +1638,7 @@ func (m *CorsPolicy) Reset()         { *m = CorsPolicy{} }
 func (m *CorsPolicy) String() string { return proto.CompactTextString(m) }
 func (*CorsPolicy) ProtoMessage()    {}
 func (*CorsPolicy) Descriptor() ([]byte, []int) {
-	return fileDescriptor_c6a47f72e9923590, []int{16}
+	return fileDescriptor_c6a47f72e9923590, []int{19}
 }
 func (m *CorsPolicy) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_CorsPolicy.Unmarshal(m, b)
@@ -1860,6 +1711,8 @@ func init() {
 	proto.RegisterEnum("gloo.solo.io.RedirectAction_RedirectResponseCode", RedirectAction_RedirectResponseCode_name, RedirectAction_RedirectResponseCode_value)
 	proto.RegisterType((*Proxy)(nil), "gloo.solo.io.Proxy")
 	proto.RegisterType((*Listener)(nil), "gloo.solo.io.Listener")
+	proto.RegisterType((*TcpListener)(nil), "gloo.solo.io.TcpListener")
+	proto.RegisterType((*TcpHost)(nil), "gloo.solo.io.TcpHost")
 	proto.RegisterType((*HttpListener)(nil), "gloo.solo.io.HttpListener")
 	proto.RegisterType((*VirtualHost)(nil), "gloo.solo.io.VirtualHost")
 	proto.RegisterType((*Route)(nil), "gloo.solo.io.Route")
@@ -1868,7 +1721,8 @@ func init() {
 	proto.RegisterType((*QueryParameterMatcher)(nil), "gloo.solo.io.QueryParameterMatcher")
 	proto.RegisterType((*RouteAction)(nil), "gloo.solo.io.RouteAction")
 	proto.RegisterType((*Destination)(nil), "gloo.solo.io.Destination")
-	proto.RegisterType((*ServiceDestination)(nil), "gloo.solo.io.ServiceDestination")
+	proto.RegisterType((*KubernetesServiceDestination)(nil), "gloo.solo.io.KubernetesServiceDestination")
+	proto.RegisterType((*ConsulServiceDestination)(nil), "gloo.solo.io.ConsulServiceDestination")
 	proto.RegisterType((*UpstreamGroup)(nil), "gloo.solo.io.UpstreamGroup")
 	proto.RegisterType((*MultiDestination)(nil), "gloo.solo.io.MultiDestination")
 	proto.RegisterType((*WeightedDestination)(nil), "gloo.solo.io.WeightedDestination")
@@ -1882,105 +1736,125 @@ func init() {
 }
 
 var fileDescriptor_c6a47f72e9923590 = []byte{
-	// 1562 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xcc, 0x57, 0x4f, 0x73, 0x23, 0x47,
-	0x15, 0xb7, 0x24, 0x4b, 0x96, 0x9e, 0x34, 0xb2, 0xb6, 0xa3, 0x75, 0x66, 0x37, 0xb0, 0xeb, 0xcc,
-	0xd6, 0x16, 0xae, 0xca, 0x22, 0xb1, 0x0e, 0x2c, 0x49, 0xa0, 0x42, 0x59, 0xb6, 0xb2, 0xa2, 0x2a,
-	0x5e, 0x8b, 0xb6, 0xe3, 0xd4, 0x86, 0xc3, 0xd4, 0x78, 0xa6, 0x35, 0x9a, 0x64, 0xa4, 0x9e, 0x74,
-	0xf7, 0xf8, 0xcf, 0x17, 0xe0, 0xcc, 0x81, 0x03, 0x1f, 0x81, 0x8f, 0xc0, 0x85, 0x2a, 0x8e, 0x5c,
-	0xf8, 0x00, 0x5c, 0x72, 0xe0, 0xc4, 0x99, 0x0b, 0x57, 0xaa, 0xff, 0xcc, 0x68, 0xc6, 0x51, 0xd8,
-	0xdd, 0x82, 0x03, 0x27, 0xcd, 0x7b, 0xef, 0xf7, 0x5e, 0xbf, 0x7e, 0x7f, 0x5b, 0xf0, 0x41, 0x18,
-	0x89, 0x79, 0x7a, 0x31, 0xf0, 0xe9, 0x62, 0xc8, 0x69, 0x4c, 0x7f, 0x18, 0xd1, 0x61, 0x18, 0x53,
-	0x3a, 0x4c, 0x18, 0xfd, 0x92, 0xf8, 0x82, 0x6b, 0xca, 0x4b, 0xa2, 0xe1, 0xe5, 0x53, 0xc9, 0xbc,
-	0xbe, 0x19, 0x24, 0x8c, 0x0a, 0x8a, 0x3a, 0x52, 0x30, 0x90, 0x3a, 0x83, 0x88, 0xde, 0x7f, 0x10,
-	0x52, 0x1a, 0xc6, 0x64, 0xa8, 0x64, 0x17, 0xe9, 0x6c, 0x78, 0xc5, 0xbc, 0x24, 0x21, 0x8c, 0x6b,
-	0xf4, 0xfd, 0x7e, 0x48, 0x43, 0xaa, 0x3e, 0x87, 0xf2, 0xcb, 0x70, 0x9f, 0xae, 0x39, 0x5d, 0xfd,
-	0x7e, 0x15, 0x89, 0xec, 0xcc, 0x05, 0x11, 0x5e, 0xe0, 0x09, 0xcf, 0xa8, 0x0c, 0x5f, 0x43, 0x85,
-	0x0b, 0x4f, 0xa4, 0xd9, 0xc9, 0x4f, 0x5e, 0x43, 0x81, 0x91, 0x99, 0x41, 0x3f, 0x7b, 0xa3, 0x78,
-	0x70, 0x1e, 0x1b, 0xbd, 0x0f, 0xdf, 0x4c, 0x2f, 0xbd, 0xe0, 0x44, 0x18, 0xd5, 0x8f, 0xde, 0x2c,
-	0x05, 0x71, 0x1a, 0x46, 0x4b, 0x73, 0x39, 0xe7, 0xcf, 0x15, 0xa8, 0x4f, 0x65, 0x52, 0xd0, 0x8f,
-	0xa1, 0x15, 0x47, 0x5c, 0x90, 0x25, 0x61, 0xdc, 0xae, 0xee, 0xd6, 0xf6, 0xda, 0xfb, 0x3b, 0x83,
-	0x62, 0x8a, 0x06, 0x9f, 0x1a, 0x31, 0x5e, 0x01, 0xd1, 0x73, 0x68, 0xe8, 0x60, 0xd9, 0x8d, 0xdd,
-	0xca, 0x5e, 0x7b, 0xbf, 0x3f, 0xf0, 0x29, 0x23, 0xb9, 0xca, 0xa9, 0x92, 0x8d, 0xee, 0xfd, 0xe5,
-	0x9b, 0x87, 0x1b, 0xff, 0xfc, 0xe6, 0xe1, 0x1d, 0x41, 0xb8, 0x08, 0xa2, 0xd9, 0xec, 0x23, 0x27,
-	0x0a, 0x97, 0x94, 0x11, 0x07, 0x1b, 0x75, 0xf4, 0x01, 0x34, 0xb3, 0x44, 0xd9, 0x5b, 0xca, 0xd4,
-	0x4e, 0xd9, 0xd4, 0xb1, 0x91, 0x8e, 0x36, 0xa5, 0x31, 0x9c, 0xa3, 0x9d, 0x3f, 0x55, 0xa1, 0x99,
-	0xb9, 0x86, 0x10, 0x6c, 0x2e, 0xbd, 0x05, 0xb1, 0x2b, 0xbb, 0x95, 0xbd, 0x16, 0x56, 0xdf, 0xe8,
-	0x5d, 0xe8, 0x5c, 0x44, 0xcb, 0xc0, 0xf5, 0x82, 0x80, 0x11, 0x2e, 0x2f, 0x27, 0x65, 0x6d, 0xc9,
-	0x3b, 0xd0, 0x2c, 0xf4, 0x0e, 0xb4, 0x14, 0x24, 0xa1, 0x4c, 0xd8, 0xb5, 0xdd, 0xca, 0x9e, 0x85,
-	0x9b, 0x92, 0x31, 0xa5, 0x4c, 0xa0, 0x03, 0xb0, 0xe6, 0x42, 0x24, 0x6e, 0x76, 0x6b, 0x7b, 0x53,
-	0xf9, 0x77, 0xbf, 0x1c, 0x9d, 0x89, 0x10, 0x49, 0xe6, 0xc6, 0x64, 0x03, 0x77, 0xe6, 0x05, 0x1a,
-	0x7d, 0x02, 0x88, 0xf3, 0xd8, 0xf5, 0xe9, 0x72, 0x16, 0x85, 0x29, 0xf3, 0x44, 0x44, 0x97, 0xdc,
-	0xae, 0xab, 0x28, 0xbf, 0x5d, 0xb6, 0x73, 0xca, 0xe3, 0x43, 0x05, 0xc3, 0x77, 0x78, 0xf6, 0x99,
-	0x69, 0xa0, 0x11, 0x6c, 0xa7, 0x9c, 0xb8, 0xaa, 0x8d, 0x5c, 0x95, 0x41, 0x13, 0xf7, 0xfb, 0x03,
-	0xdd, 0x3f, 0x83, 0xac, 0x7f, 0x06, 0x23, 0x4a, 0xe3, 0x73, 0x2f, 0x4e, 0x09, 0xb6, 0x52, 0x4e,
-	0x54, 0x8e, 0xa7, 0x52, 0x36, 0xea, 0x42, 0x27, 0xf3, 0xeb, 0xec, 0x26, 0x21, 0xce, 0xef, 0x2b,
-	0xd0, 0x29, 0x3a, 0x8f, 0x3e, 0x06, 0xeb, 0x32, 0x62, 0x22, 0xf5, 0x62, 0x77, 0x4e, 0xb9, 0xe0,
-	0x76, 0x45, 0xf9, 0x79, 0xaf, 0xec, 0xe7, 0xb9, 0x86, 0x4c, 0x28, 0x17, 0xb8, 0x73, 0xb9, 0x22,
-	0x38, 0x9a, 0x40, 0x2f, 0x0b, 0x95, 0x6b, 0xaa, 0x4d, 0xc5, 0xbc, 0xbd, 0xff, 0xfd, 0xf5, 0x05,
-	0x35, 0xd5, 0x20, 0xbc, 0x1d, 0x97, 0x19, 0xce, 0xbf, 0x2a, 0xd0, 0x2e, 0x9c, 0xb3, 0x36, 0xbb,
-	0x36, 0x6c, 0x05, 0x74, 0xe1, 0xe9, 0x43, 0x6a, 0x7b, 0x2d, 0x9c, 0x91, 0xe8, 0x3d, 0x68, 0x30,
-	0x9a, 0x0a, 0xc2, 0xed, 0x9a, 0xba, 0xc0, 0x5b, 0xe5, 0xd3, 0xb1, 0x94, 0x61, 0x03, 0x41, 0x18,
-	0xfa, 0xc5, 0x4b, 0xe7, 0x8e, 0xeb, 0x5c, 0xef, 0x7e, 0xe7, 0xdd, 0x33, 0xdf, 0xd1, 0xe5, 0xb7,
-	0x78, 0xe8, 0x43, 0x68, 0xfb, 0x94, 0x71, 0x37, 0xa1, 0x71, 0xe4, 0xdf, 0xd8, 0x75, 0x65, 0xca,
-	0x2e, 0x9b, 0x3a, 0xa4, 0x8c, 0x4f, 0x95, 0x1c, 0x83, 0x9f, 0x7f, 0x3b, 0xff, 0xa8, 0x42, 0x5d,
-	0x39, 0x88, 0x86, 0xb0, 0xb5, 0xf0, 0x84, 0x3f, 0x27, 0x4c, 0x5d, 0xbb, 0xbd, 0x7f, 0xb7, 0x6c,
-	0xe0, 0x58, 0x0b, 0x71, 0x86, 0x42, 0x1f, 0x43, 0x47, 0xdd, 0xc9, 0xf5, 0x7c, 0x59, 0x34, 0x26,
-	0xf4, 0xf7, 0xd6, 0x5c, 0xfe, 0x40, 0x01, 0x26, 0x1b, 0xb8, 0xcd, 0x56, 0x24, 0x7a, 0x0e, 0xdb,
-	0x8c, 0x04, 0x11, 0x23, 0xbe, 0xc8, 0x4c, 0xd4, 0x94, 0x89, 0xef, 0xdd, 0x32, 0x61, 0x40, 0xb9,
-	0x95, 0x2e, 0x2b, 0x71, 0xd0, 0x17, 0xb0, 0x63, 0xcc, 0x30, 0xc2, 0x13, 0xba, 0xe4, 0xb9, 0x4b,
-	0x3a, 0xa8, 0x4e, 0xd9, 0xde, 0x91, 0xc2, 0x62, 0x03, 0xcd, 0xad, 0xf6, 0x83, 0x35, 0x7c, 0xf4,
-	0x0b, 0xb0, 0xf4, 0x25, 0xb3, 0x3c, 0xd5, 0xd7, 0xf5, 0xa4, 0xba, 0x65, 0x96, 0x21, 0x1d, 0x15,
-	0x43, 0x8d, 0x9a, 0xd0, 0xd0, 0xce, 0x38, 0xbf, 0xa9, 0xc2, 0x96, 0x09, 0x22, 0xb2, 0xa1, 0x91,
-	0x30, 0x32, 0x8b, 0xae, 0x75, 0x89, 0x4d, 0x36, 0xb0, 0xa1, 0xd1, 0x0e, 0xd4, 0xc9, 0xb5, 0xe7,
-	0x0b, 0x3d, 0x3d, 0x26, 0x1b, 0x58, 0x93, 0x92, 0xcf, 0x48, 0x48, 0xae, 0x55, 0x8c, 0x14, 0x5f,
-	0x91, 0xe8, 0x27, 0xb0, 0x35, 0x27, 0x5e, 0x20, 0x87, 0x69, 0x43, 0x55, 0xdf, 0x3b, 0xb7, 0xc6,
-	0x85, 0x12, 0xe6, 0xc9, 0x33, 0x58, 0xf4, 0x02, 0x7a, 0x5f, 0xa7, 0x84, 0xdd, 0xb8, 0x89, 0xc7,
-	0xbc, 0x05, 0x11, 0x52, 0x7f, 0x4b, 0xe9, 0x3f, 0x2a, 0xeb, 0xff, 0x4a, 0xa2, 0xa6, 0x19, 0x28,
-	0xb3, 0xb3, 0xfd, 0x75, 0x89, 0xcd, 0x65, 0x77, 0x2c, 0x88, 0x98, 0xd3, 0x80, 0xdb, 0x4d, 0xdd,
-	0x1d, 0x86, 0x1c, 0xf5, 0xa0, 0x9b, 0x78, 0x62, 0xee, 0xf2, 0x84, 0xf8, 0xd1, 0x2c, 0x22, 0xcc,
-	0x39, 0x01, 0xab, 0xe4, 0xd5, 0xda, 0x76, 0xeb, 0x43, 0xfd, 0x52, 0x4e, 0x15, 0x33, 0x45, 0x35,
-	0x21, 0xb9, 0xab, 0x28, 0x34, 0x4d, 0x0c, 0x9c, 0xcf, 0xe1, 0xee, 0x5a, 0x37, 0xff, 0x6b, 0xc3,
-	0x7f, 0xad, 0x40, 0xbb, 0x50, 0xc1, 0xe8, 0x7d, 0x68, 0xf0, 0x68, 0x19, 0xc6, 0xc4, 0xb4, 0xc8,
-	0xad, 0x62, 0x3f, 0x22, 0x5c, 0x44, 0x4b, 0xcf, 0x14, 0x94, 0x81, 0xa2, 0x67, 0x50, 0x5f, 0xa4,
-	0xb1, 0x88, 0x4c, 0x83, 0x3c, 0xb8, 0xd5, 0x56, 0x52, 0x54, 0x56, 0xd4, 0x70, 0x34, 0x82, 0x6e,
-	0x9a, 0x70, 0xc1, 0x88, 0xb7, 0x70, 0x43, 0x46, 0xd3, 0xc4, 0xb4, 0xc7, 0xbd, 0xf2, 0xbe, 0xc2,
-	0x84, 0xd3, 0x94, 0xf9, 0x04, 0x93, 0xd9, 0x64, 0x03, 0x5b, 0x99, 0xca, 0x73, 0xa9, 0x31, 0xb2,
-	0xa0, 0x1d, 0xac, 0x6c, 0x3b, 0xbf, 0xad, 0x42, 0xbb, 0x70, 0x16, 0xfa, 0x29, 0x34, 0x33, 0xbc,
-	0x0d, 0xaf, 0x36, 0x9e, 0x83, 0xd1, 0xcf, 0x61, 0x8b, 0x13, 0x76, 0x19, 0xf9, 0xc4, 0x6e, 0xaf,
-	0x1b, 0x5c, 0xa7, 0x5a, 0x58, 0xbe, 0x57, 0xa6, 0x22, 0x07, 0x77, 0xc1, 0x2b, 0x55, 0x19, 0xeb,
-	0x07, 0x77, 0x41, 0xff, 0x34, 0x21, 0x3e, 0xde, 0x0e, 0xca, 0x0c, 0xf4, 0x04, 0x1a, 0xfa, 0x89,
-	0x62, 0x62, 0xd3, 0xbf, 0xe5, 0x86, 0x92, 0x61, 0x83, 0x19, 0xa1, 0xf2, 0xb9, 0x42, 0x6e, 0xa5,
-	0x5f, 0x03, 0xfa, 0xb6, 0xb3, 0xe8, 0x29, 0xd4, 0x18, 0x99, 0xe5, 0x59, 0xfe, 0xae, 0x98, 0x98,
-	0x37, 0x82, 0xc4, 0xca, 0x5a, 0x53, 0x5b, 0xbd, 0xaa, 0xb6, 0xba, 0xfa, 0x76, 0xfe, 0x56, 0x01,
-	0xeb, 0xb3, 0x62, 0x42, 0xd0, 0x18, 0x3a, 0x05, 0x17, 0xb2, 0x95, 0xf7, 0x6e, 0xd9, 0xed, 0xcf,
-	0x49, 0x14, 0xce, 0x05, 0x09, 0x0a, 0x1e, 0xe1, 0x92, 0xda, 0xff, 0xc3, 0x73, 0xe8, 0x25, 0xf4,
-	0x6e, 0xd7, 0xee, 0xff, 0xe8, 0x76, 0xce, 0x97, 0xf0, 0xd6, 0x1a, 0x10, 0xfa, 0x59, 0xa9, 0x98,
-	0x5f, 0xd9, 0x82, 0xb8, 0x88, 0x46, 0x3b, 0xd0, 0xb8, 0x52, 0x36, 0x4d, 0x82, 0x0c, 0xe5, 0xfc,
-	0xb1, 0x06, 0xdd, 0xf2, 0x86, 0x41, 0x8f, 0xc0, 0x52, 0xab, 0x39, 0x5b, 0x33, 0x66, 0x7c, 0x74,
-	0x24, 0x33, 0x83, 0xa2, 0xc7, 0x60, 0xa9, 0xb1, 0x96, 0x83, 0xb2, 0x79, 0xdd, 0x91, 0xec, 0x1c,
-	0xf6, 0x03, 0xe8, 0xea, 0xc1, 0xee, 0x32, 0x72, 0xc5, 0x22, 0x41, 0xd4, 0x02, 0x91, 0x38, 0x4b,
-	0xf3, 0xb1, 0x66, 0xa3, 0x73, 0xb0, 0xf2, 0xed, 0xe5, 0xd3, 0x80, 0xa8, 0x82, 0xee, 0xee, 0x3f,
-	0xfd, 0x4f, 0xbb, 0x30, 0x27, 0xb3, 0xa5, 0x75, 0x48, 0x03, 0x82, 0x3b, 0xac, 0x40, 0xa1, 0xc7,
-	0xd0, 0x95, 0x2f, 0x44, 0xbe, 0x72, 0x74, 0x53, 0x4d, 0x38, 0xf5, 0xd4, 0xe4, 0xb9, 0x9f, 0x0f,
-	0xa1, 0xcd, 0x05, 0x8b, 0x12, 0x57, 0x0d, 0x76, 0x55, 0x55, 0x4d, 0x0c, 0x8a, 0xa5, 0x46, 0xab,
-	0x73, 0x05, 0xfd, 0x75, 0xa7, 0xa1, 0xbb, 0x70, 0xe7, 0xf8, 0xe4, 0x7c, 0x7c, 0xe4, 0x4e, 0xc7,
-	0xf8, 0xf8, 0xe0, 0xc5, 0xf8, 0xc5, 0xd9, 0xa7, 0x2f, 0x7b, 0x1b, 0xa8, 0x05, 0xf5, 0x4f, 0x4e,
-	0x3e, 0x7b, 0x71, 0xd4, 0xab, 0x20, 0x0b, 0x5a, 0xa7, 0xe3, 0xb1, 0x7b, 0x72, 0x36, 0x19, 0xe3,
-	0x5e, 0x15, 0xed, 0x00, 0x3a, 0x1b, 0x1f, 0x4f, 0x4f, 0xf0, 0x01, 0x7e, 0xe9, 0xe2, 0xf1, 0xd1,
-	0x2f, 0xf1, 0xf8, 0xf0, 0xac, 0x57, 0x93, 0xfc, 0xdc, 0xc4, 0x8a, 0xbf, 0x39, 0xb2, 0x61, 0xc7,
-	0x04, 0x5a, 0x05, 0xaa, 0xb0, 0x47, 0x46, 0xd0, 0x5f, 0xb7, 0xcb, 0x65, 0xaa, 0x4d, 0x73, 0x54,
-	0x74, 0xaa, 0x4d, 0xad, 0x23, 0xd8, 0xbc, 0xa0, 0xc1, 0x8d, 0x19, 0xfc, 0xea, 0xdb, 0xf9, 0x5d,
-	0x15, 0x60, 0xf5, 0x34, 0x92, 0x4f, 0x78, 0x2f, 0x8e, 0xe9, 0x95, 0x4b, 0x59, 0x14, 0x46, 0x4b,
-	0x55, 0xc0, 0x2d, 0xdc, 0x56, 0xbc, 0x13, 0xc5, 0x42, 0x4f, 0x00, 0x15, 0x21, 0xae, 0x5e, 0x1b,
-	0xfa, 0x49, 0xd8, 0x2b, 0x00, 0xb1, 0x5a, 0xcf, 0x8f, 0xc0, 0xd2, 0xe8, 0x6c, 0x3b, 0xd6, 0x14,
-	0x50, 0x9f, 0x72, 0xac, 0x79, 0x2b, 0x50, 0xb6, 0xc9, 0x37, 0x0b, 0xa0, 0x89, 0xd9, 0xd8, 0x8f,
-	0xa1, 0x4b, 0xae, 0x13, 0xca, 0x49, 0x8e, 0xaa, 0x2b, 0x94, 0xa5, 0xb9, 0x19, 0xec, 0x6d, 0xf9,
-	0x8c, 0xbb, 0x76, 0xbd, 0x90, 0xa8, 0x24, 0xb6, 0x70, 0x63, 0xe1, 0x5d, 0x1f, 0x84, 0x04, 0xbd,
-	0x07, 0x77, 0xf4, 0x21, 0x3e, 0x23, 0x01, 0x59, 0x8a, 0xc8, 0x8b, 0xb9, 0x6a, 0xf9, 0xa6, 0x71,
-	0xfb, 0x70, 0xc5, 0x1f, 0x3d, 0xfb, 0xc3, 0xdf, 0x1f, 0x54, 0xbe, 0xf8, 0xd1, 0xeb, 0xfd, 0xe1,
-	0x4b, 0xbe, 0x0a, 0xcd, 0x9f, 0xbe, 0x8b, 0x86, 0xfa, 0x5b, 0xf0, 0xfe, 0xbf, 0x03, 0x00, 0x00,
-	0xff, 0xff, 0x6c, 0xb9, 0xc8, 0xdf, 0xae, 0x0f, 0x00, 0x00,
+	// 1887 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xcc, 0x58, 0x3b, 0x73, 0x1b, 0xc9,
+	0x11, 0x26, 0x1e, 0x04, 0x81, 0xc6, 0x83, 0xd0, 0x1c, 0xc5, 0x83, 0x74, 0x7a, 0x50, 0xab, 0x92,
+	0xcd, 0xf2, 0xc9, 0xa0, 0xa5, 0xb3, 0x75, 0x67, 0xba, 0x7c, 0x3e, 0x82, 0xc4, 0x09, 0x2e, 0x8b,
+	0x0f, 0x0f, 0x79, 0xba, 0xd2, 0x25, 0x5b, 0xcb, 0xc5, 0x70, 0xb9, 0xa7, 0x05, 0x66, 0x6f, 0x66,
+	0x96, 0x8f, 0x54, 0x81, 0x7f, 0x80, 0x23, 0x47, 0x8e, 0xef, 0x17, 0xb8, 0x9c, 0x38, 0x73, 0xe0,
+	0xc4, 0xa9, 0x9d, 0x5d, 0xe0, 0x7f, 0x20, 0x47, 0xae, 0x72, 0xe2, 0x9a, 0xd7, 0x62, 0x17, 0x04,
+	0x25, 0xb1, 0xec, 0xc0, 0x11, 0x77, 0xba, 0xbf, 0xee, 0xe9, 0xe7, 0x74, 0x83, 0xf0, 0x49, 0x10,
+	0x8a, 0xe3, 0xe4, 0xb0, 0xeb, 0xd3, 0xd1, 0x1a, 0xa7, 0x11, 0xfd, 0x61, 0x48, 0xd7, 0x82, 0x88,
+	0xd2, 0xb5, 0x98, 0xd1, 0xaf, 0x89, 0x2f, 0xb8, 0x3e, 0x79, 0x71, 0xb8, 0x76, 0xf2, 0x48, 0x12,
+	0xcf, 0xce, 0xbb, 0x31, 0xa3, 0x82, 0xa2, 0x86, 0x64, 0x74, 0xa5, 0x4c, 0x37, 0xa4, 0x37, 0xef,
+	0x04, 0x94, 0x06, 0x11, 0x59, 0x53, 0xbc, 0xc3, 0xe4, 0x68, 0xed, 0x94, 0x79, 0x71, 0x4c, 0x18,
+	0xd7, 0xe8, 0x9b, 0xb7, 0xa6, 0xf9, 0x5c, 0xb0, 0xc4, 0x17, 0x86, 0xbb, 0x14, 0xd0, 0x80, 0xaa,
+	0xcf, 0x35, 0xf9, 0x65, 0xa8, 0x8f, 0x66, 0xd8, 0xa6, 0xfe, 0xbe, 0x0c, 0x85, 0xb5, 0x68, 0x44,
+	0x84, 0x37, 0xf4, 0x84, 0x67, 0x44, 0xd6, 0xde, 0x41, 0x84, 0x0b, 0x4f, 0x24, 0xd6, 0xae, 0x87,
+	0xef, 0x20, 0xc0, 0xc8, 0xd1, 0x15, 0x2c, 0xb2, 0x67, 0x23, 0xf2, 0xe4, 0x4a, 0x01, 0xe6, 0x3c,
+	0x32, 0x72, 0x3f, 0xbd, 0x9a, 0x5c, 0x72, 0xc8, 0x89, 0xbd, 0x72, 0xfd, 0x6a, 0x39, 0x8d, 0x92,
+	0x20, 0x1c, 0x9b, 0x78, 0x38, 0x7f, 0x2f, 0xc0, 0xfc, 0x9e, 0xcc, 0x32, 0xfa, 0x31, 0xd4, 0xa2,
+	0x90, 0x0b, 0x32, 0x26, 0x8c, 0x77, 0x8a, 0x2b, 0xa5, 0xd5, 0xfa, 0xe3, 0xe5, 0x6e, 0x36, 0xe7,
+	0xdd, 0x67, 0x86, 0x8d, 0x27, 0x40, 0xf4, 0x14, 0x2a, 0x3a, 0xbe, 0x9d, 0xca, 0x4a, 0x61, 0xb5,
+	0xfe, 0x78, 0xa9, 0xeb, 0x53, 0x46, 0x52, 0x91, 0x7d, 0xc5, 0xeb, 0xdd, 0xf8, 0xcb, 0x77, 0x77,
+	0xe7, 0xfe, 0xf9, 0xdd, 0xdd, 0x6b, 0x82, 0x70, 0x31, 0x0c, 0x8f, 0x8e, 0xd6, 0x9d, 0x30, 0x18,
+	0x53, 0x46, 0x1c, 0x6c, 0xc4, 0xd1, 0x27, 0x50, 0xb5, 0xb9, 0xed, 0x2c, 0x28, 0x55, 0xcb, 0x79,
+	0x55, 0xdb, 0x86, 0xdb, 0x2b, 0x4b, 0x65, 0x38, 0x45, 0xaf, 0x5f, 0x7f, 0xf5, 0xba, 0x5c, 0x86,
+	0x62, 0x7c, 0xf6, 0xea, 0x75, 0xb9, 0x86, 0x16, 0x64, 0xcd, 0x86, 0x84, 0x3b, 0x7f, 0x28, 0x41,
+	0xd5, 0x5a, 0x8c, 0x10, 0x94, 0xc7, 0xde, 0x88, 0x74, 0x0a, 0x2b, 0x85, 0xd5, 0x1a, 0x56, 0xdf,
+	0xe8, 0x1e, 0x34, 0x0e, 0xc3, 0xf1, 0xd0, 0xf5, 0x86, 0x43, 0x46, 0xb8, 0xf4, 0x59, 0xf2, 0xea,
+	0x92, 0xb6, 0xa1, 0x49, 0xe8, 0x03, 0xa8, 0x29, 0x48, 0x4c, 0x99, 0xe8, 0x94, 0x56, 0x0a, 0xab,
+	0x4d, 0x5c, 0x95, 0x84, 0x3d, 0xca, 0x04, 0xda, 0x80, 0xe6, 0xb1, 0x10, 0xb1, 0x6b, 0x83, 0xd1,
+	0x29, 0x2b, 0xb3, 0x6f, 0xe6, 0x83, 0x36, 0x10, 0x22, 0xb6, 0x66, 0x0c, 0xe6, 0x70, 0xe3, 0x38,
+	0x73, 0x46, 0x9f, 0x42, 0x43, 0xf8, 0x19, 0x0d, 0xf3, 0x4a, 0xc3, 0x8d, 0xbc, 0x86, 0x03, 0x3f,
+	0xab, 0xa0, 0x2e, 0x26, 0x47, 0xf4, 0x39, 0x20, 0xce, 0x23, 0xd7, 0xa7, 0xe3, 0xa3, 0x30, 0x48,
+	0x98, 0x27, 0x42, 0x3a, 0x96, 0x99, 0x90, 0xc9, 0x7b, 0x3f, 0xaf, 0x65, 0x9f, 0x47, 0x9b, 0x0a,
+	0x86, 0xaf, 0x71, 0xfb, 0x69, 0x25, 0x50, 0x0f, 0x16, 0x13, 0x4e, 0x5c, 0xd5, 0xee, 0xae, 0x2a,
+	0x0c, 0x93, 0x83, 0x9b, 0x5d, 0xdd, 0xc7, 0x5d, 0xdb, 0xc7, 0xdd, 0x1e, 0xa5, 0xd1, 0x73, 0x2f,
+	0x4a, 0x08, 0x6e, 0x26, 0x9c, 0xa8, 0xd2, 0xd9, 0x53, 0xef, 0xc3, 0xc7, 0xb0, 0x60, 0x4a, 0xab,
+	0x53, 0x55, 0xb2, 0xb7, 0x67, 0x57, 0xcf, 0x9e, 0x06, 0x61, 0x8b, 0xee, 0xb5, 0xa0, 0x61, 0x79,
+	0x07, 0xe7, 0x31, 0x71, 0x7e, 0x5f, 0x80, 0x7a, 0xc6, 0x67, 0xf4, 0x18, 0x6a, 0x32, 0x48, 0xc7,
+	0x94, 0x0b, 0xde, 0x29, 0x28, 0xdf, 0xae, 0x5f, 0x88, 0xd0, 0x80, 0x72, 0x81, 0xab, 0x42, 0x7f,
+	0x70, 0xb4, 0x3e, 0x6d, 0xcc, 0xca, 0xa5, 0x31, 0x9d, 0xb6, 0x07, 0xdd, 0x85, 0xba, 0xac, 0x49,
+	0x37, 0x66, 0xe4, 0x28, 0x3c, 0x53, 0x69, 0xaf, 0x61, 0x90, 0xa4, 0x3d, 0x45, 0x71, 0x7e, 0x5b,
+	0x80, 0x05, 0x73, 0xe5, 0xcc, 0xc2, 0xfa, 0x19, 0xd4, 0x87, 0x84, 0x8b, 0x70, 0xac, 0xa2, 0xab,
+	0xea, 0xea, 0x42, 0x52, 0x31, 0x4d, 0x04, 0xd9, 0xf0, 0x25, 0x00, 0x67, 0xd1, 0xe8, 0x09, 0xc0,
+	0x24, 0xa5, 0xea, 0xf2, 0x37, 0xa4, 0xb2, 0x96, 0xa6, 0xd2, 0xf9, 0x53, 0x01, 0x1a, 0x83, 0x7c,
+	0x6d, 0x35, 0x4f, 0x42, 0x26, 0x12, 0x2f, 0xca, 0x85, 0x6e, 0xca, 0x8e, 0xe7, 0x1a, 0xa2, 0xc2,
+	0xd7, 0x38, 0x99, 0x1c, 0x38, 0x7a, 0x06, 0x6d, 0x5b, 0x97, 0xae, 0x8d, 0xa5, 0x76, 0xe5, 0xde,
+	0xe5, 0x15, 0x6e, 0x83, 0xb9, 0x18, 0xe5, 0x09, 0x6f, 0x0f, 0xea, 0xbf, 0x0b, 0x50, 0xcf, 0x18,
+	0x33, 0x33, 0xb0, 0x1d, 0x58, 0x18, 0xd2, 0x91, 0xa7, 0x2d, 0x29, 0xad, 0xd6, 0xb0, 0x3d, 0xa2,
+	0x0f, 0xa1, 0xc2, 0x64, 0x44, 0x79, 0xa7, 0xa4, 0xbc, 0x7c, 0x6f, 0x46, 0xb4, 0xb1, 0x81, 0x20,
+	0x0c, 0x4b, 0xd9, 0xc8, 0xa4, 0xde, 0x95, 0x67, 0x55, 0x4a, 0xc6, 0x26, 0xeb, 0x1c, 0x3a, 0xb9,
+	0x40, 0x43, 0x3f, 0x87, 0xba, 0x4f, 0x19, 0x77, 0x63, 0x1a, 0x85, 0xfe, 0xb9, 0x69, 0xe4, 0x4e,
+	0x5e, 0xd5, 0x26, 0x65, 0x7c, 0x4f, 0xf1, 0x7b, 0xc5, 0x4e, 0x01, 0x83, 0x9f, 0x9e, 0x9d, 0x6f,
+	0x4b, 0x30, 0xaf, 0x8c, 0x44, 0x6b, 0xb0, 0x30, 0xf2, 0x84, 0x7f, 0x4c, 0x98, 0x72, 0xfd, 0x42,
+	0xad, 0x6f, 0x6b, 0x26, 0xb6, 0x28, 0xf9, 0x86, 0x28, 0xbf, 0x5c, 0xcf, 0x7f, 0xa7, 0x72, 0x93,
+	0x6f, 0x08, 0x9b, 0x1c, 0xd1, 0x53, 0x58, 0x64, 0x64, 0x18, 0x32, 0xe2, 0x0b, 0xab, 0x42, 0x57,
+	0xdd, 0xad, 0x29, 0x15, 0x06, 0x94, 0x6a, 0x69, 0xb1, 0x1c, 0x05, 0x7d, 0x05, 0xcb, 0x46, 0x0d,
+	0x23, 0x3c, 0xa6, 0x63, 0x9e, 0x9a, 0xa4, 0x03, 0xeb, 0xe4, 0xf5, 0x6d, 0x29, 0x2c, 0x36, 0xd0,
+	0x54, 0xeb, 0xd2, 0x70, 0x06, 0x1d, 0xfd, 0x02, 0x9a, 0xda, 0x49, 0x9b, 0xab, 0xf9, 0x59, 0x6f,
+	0xad, 0xf2, 0xd2, 0x66, 0x49, 0x47, 0xc5, 0xe6, 0xe7, 0x53, 0x68, 0x69, 0x05, 0xe9, 0x90, 0xa9,
+	0xd8, 0xd6, 0x9a, 0x7a, 0xe0, 0xf6, 0xd5, 0xa2, 0x82, 0xf5, 0x7d, 0xe9, 0xd0, 0xa9, 0x42, 0x45,
+	0x3b, 0xe3, 0xfc, 0xa6, 0x08, 0x0b, 0x26, 0x09, 0xa8, 0x03, 0x15, 0x53, 0xd0, 0xaa, 0x4c, 0x07,
+	0x73, 0xd8, 0x9c, 0xd1, 0x32, 0xcc, 0x93, 0x33, 0xcf, 0x17, 0x7a, 0xaa, 0x0c, 0xe6, 0xb0, 0x3e,
+	0x4a, 0x3a, 0x23, 0x01, 0x31, 0x1d, 0x20, 0xe9, 0xea, 0x88, 0x7e, 0x02, 0x0b, 0xc7, 0xc4, 0x1b,
+	0xca, 0xd9, 0xab, 0x9f, 0xef, 0x0f, 0xa6, 0x9a, 0x4c, 0x31, 0xd3, 0xe4, 0x1b, 0x2c, 0xda, 0x81,
+	0xf6, 0x37, 0x09, 0x61, 0xe7, 0x6e, 0xec, 0x31, 0x6f, 0x44, 0x84, 0x94, 0x5f, 0x50, 0xf2, 0xf7,
+	0xf3, 0xf2, 0xbf, 0x96, 0xa8, 0x3d, 0x0b, 0xb2, 0x7a, 0x16, 0xbf, 0xc9, 0x91, 0xb9, 0xec, 0xb0,
+	0x11, 0x11, 0xc7, 0x74, 0x28, 0xdf, 0x4d, 0xd5, 0x61, 0xe6, 0xd8, 0x6b, 0x43, 0x2b, 0xf6, 0xc4,
+	0xb1, 0xcb, 0x63, 0xe2, 0x87, 0x47, 0x21, 0x61, 0x0e, 0x83, 0x66, 0xce, 0xaa, 0x99, 0x2d, 0xbb,
+	0x04, 0xf3, 0x27, 0x72, 0x5a, 0x98, 0xe9, 0xaa, 0x0f, 0x92, 0x3a, 0x89, 0x42, 0xd5, 0xc6, 0xe0,
+	0x1e, 0x34, 0xc2, 0xf1, 0x09, 0x61, 0xc2, 0x55, 0xb5, 0xad, 0xca, 0xa6, 0x8a, 0xeb, 0x9a, 0xa6,
+	0x2e, 0x71, 0xbe, 0x84, 0xeb, 0x33, 0x3d, 0xf9, 0x6f, 0xef, 0x76, 0xfe, 0x5a, 0x80, 0x7a, 0xa6,
+	0x49, 0xd0, 0x47, 0x50, 0xe1, 0xe1, 0x38, 0x88, 0x88, 0xe9, 0xc2, 0xa9, 0x7e, 0xda, 0x9a, 0xbc,
+	0xd8, 0x32, 0xe9, 0x1a, 0x8a, 0x9e, 0xc0, 0xfc, 0x28, 0x89, 0x44, 0x68, 0x7a, 0xf0, 0xce, 0x54,
+	0xe7, 0x4a, 0x56, 0x5e, 0x50, 0xc3, 0x51, 0x0f, 0x5a, 0x49, 0xcc, 0x05, 0x23, 0xde, 0xc8, 0x0d,
+	0x18, 0x4d, 0x62, 0xd3, 0x81, 0x37, 0xf2, 0x1b, 0x10, 0x26, 0x9c, 0x26, 0xcc, 0x27, 0x98, 0x1c,
+	0x0d, 0xe6, 0x70, 0xd3, 0x8a, 0x3c, 0x95, 0x12, 0xbd, 0x66, 0x6e, 0xe8, 0x38, 0x7f, 0x2b, 0x42,
+	0x3d, 0x73, 0x17, 0xfa, 0x18, 0xaa, 0x16, 0xdf, 0x81, 0xb7, 0x2b, 0x4f, 0xc1, 0xe8, 0x33, 0x28,
+	0xbf, 0x4c, 0x0e, 0x49, 0xa7, 0xae, 0x84, 0x7e, 0x90, 0x77, 0xe9, 0x57, 0xc9, 0x21, 0x61, 0x63,
+	0x22, 0x08, 0xdf, 0x27, 0xec, 0x24, 0xf4, 0x49, 0xde, 0x3d, 0x25, 0x89, 0x3e, 0x83, 0x8a, 0x4f,
+	0xc7, 0x3c, 0x89, 0x3a, 0x0d, 0xa5, 0xe3, 0x7b, 0xd3, 0xaf, 0xa2, 0xe4, 0xcd, 0x94, 0x37, 0x72,
+	0x68, 0x00, 0xed, 0x8c, 0x6f, 0xaa, 0x04, 0x4d, 0x88, 0x6f, 0x5f, 0x9a, 0x96, 0xfd, 0x98, 0xf8,
+	0x78, 0x71, 0x98, 0x27, 0xa0, 0x87, 0x50, 0xd1, 0xab, 0xb3, 0x89, 0xf0, 0xd2, 0xd4, 0x64, 0x55,
+	0x3c, 0x6c, 0x30, 0x3d, 0x94, 0xbf, 0x57, 0xc8, 0xed, 0x84, 0xc0, 0xad, 0x37, 0x79, 0x8d, 0x1e,
+	0x41, 0x89, 0x91, 0xa3, 0xb4, 0x6a, 0x2e, 0x8b, 0xb1, 0xd9, 0x62, 0x25, 0x56, 0xd6, 0xae, 0x5a,
+	0x30, 0x8b, 0x6a, 0xc1, 0x54, 0xdf, 0x8e, 0x80, 0xce, 0x65, 0x81, 0x91, 0x7d, 0xc2, 0x35, 0xd5,
+	0xcd, 0xd4, 0x7c, 0xdd, 0xd0, 0x76, 0x64, 0xe9, 0x23, 0x28, 0x0b, 0x2f, 0xb0, 0x63, 0x52, 0x7d,
+	0x4b, 0x31, 0xf9, 0x94, 0xb9, 0x3e, 0x19, 0xab, 0x77, 0xa2, 0xa4, 0x78, 0x75, 0x49, 0xdb, 0xd4,
+	0x24, 0xe7, 0x5f, 0x05, 0x68, 0x7e, 0x91, 0x2d, 0x2b, 0xd4, 0x87, 0x46, 0x26, 0x04, 0x76, 0x89,
+	0x98, 0xda, 0x00, 0xbe, 0x24, 0x61, 0x70, 0x2c, 0xc8, 0x30, 0x63, 0x24, 0xce, 0x89, 0xfd, 0x3f,
+	0xfc, 0x4c, 0xb8, 0xad, 0x7f, 0x26, 0x24, 0xc1, 0xab, 0xd7, 0xe5, 0x6b, 0x68, 0x31, 0xdf, 0x70,
+	0xdc, 0x79, 0x01, 0xed, 0xe9, 0x06, 0xfd, 0x1f, 0x39, 0xef, 0xfc, 0xb9, 0x08, 0xef, 0xcd, 0x40,
+	0x4d, 0xef, 0x89, 0x6f, 0x7b, 0x68, 0xf2, 0x7b, 0xe2, 0x32, 0x54, 0x4e, 0x95, 0x4e, 0x53, 0x36,
+	0xe6, 0x84, 0x22, 0xf8, 0x40, 0x7d, 0x91, 0xa1, 0x9b, 0xad, 0x5d, 0x3b, 0x37, 0x75, 0xd9, 0xaf,
+	0xbe, 0xd5, 0x05, 0x33, 0x37, 0xd5, 0xa2, 0x72, 0xc3, 0x28, 0xbc, 0xc8, 0x46, 0x5f, 0xc3, 0xad,
+	0x53, 0x23, 0x3c, 0xf3, 0xba, 0xf2, 0xd5, 0xae, 0xc3, 0x37, 0x4f, 0x2f, 0xe5, 0x39, 0x7f, 0x2c,
+	0x41, 0x2b, 0xbf, 0x84, 0xa0, 0xfb, 0xd0, 0x54, 0x1b, 0x9c, 0xdd, 0x44, 0x4c, 0x2b, 0x34, 0x24,
+	0xd1, 0x42, 0xd1, 0x03, 0x68, 0xaa, 0xc9, 0x95, 0x82, 0xec, 0x48, 0x6e, 0x48, 0x72, 0x0a, 0xfb,
+	0x3e, 0xb4, 0xf4, 0xec, 0x76, 0x19, 0x39, 0x65, 0xa1, 0x20, 0x6a, 0xc7, 0x90, 0xb8, 0xa6, 0xa6,
+	0x63, 0x4d, 0x46, 0xcf, 0xa1, 0x99, 0x2e, 0x38, 0x3e, 0x1d, 0x12, 0x15, 0xd3, 0xd6, 0xe3, 0x47,
+	0x6f, 0x5a, 0x97, 0xd2, 0xa3, 0xdd, 0x6b, 0x36, 0xe9, 0x90, 0xe0, 0x06, 0xcb, 0x9c, 0xd0, 0x03,
+	0x68, 0xc9, 0x1f, 0x87, 0x7c, 0x62, 0xa8, 0x1e, 0x80, 0xea, 0x57, 0x26, 0x4f, 0xed, 0x54, 0x9b,
+	0x34, 0x0b, 0x63, 0x57, 0xcd, 0x6e, 0xd5, 0x4f, 0x55, 0xb9, 0x49, 0xb3, 0x30, 0x56, 0xa3, 0xd1,
+	0x39, 0x85, 0xa5, 0x59, 0xb7, 0xa1, 0xeb, 0x70, 0x6d, 0x7b, 0xf7, 0x79, 0x7f, 0xcb, 0xdd, 0xeb,
+	0xe3, 0xed, 0x8d, 0x9d, 0xfe, 0xce, 0xc1, 0xb3, 0x17, 0xed, 0x39, 0x54, 0x83, 0xf9, 0xcf, 0x77,
+	0xbf, 0xd8, 0xd9, 0x6a, 0x17, 0x50, 0x13, 0x6a, 0xfb, 0xfd, 0xbe, 0xbb, 0x7b, 0x30, 0xe8, 0xe3,
+	0x76, 0x11, 0x2d, 0x03, 0x3a, 0xe8, 0x6f, 0xef, 0xed, 0xe2, 0x0d, 0xfc, 0xc2, 0xc5, 0xfd, 0xad,
+	0x5f, 0xe2, 0xfe, 0xe6, 0x41, 0xbb, 0x24, 0xe9, 0xa9, 0x8a, 0x09, 0xbd, 0xdc, 0xeb, 0xc0, 0xb2,
+	0x09, 0xb4, 0x0a, 0x54, 0x66, 0x55, 0xe8, 0xc1, 0xd2, 0xac, 0x75, 0x4f, 0x16, 0xb1, 0x79, 0x16,
+	0x0a, 0xba, 0x88, 0x4d, 0x97, 0x23, 0x28, 0x1f, 0xd2, 0xe1, 0xb9, 0x19, 0xdc, 0xea, 0xdb, 0xf9,
+	0x5d, 0x11, 0x60, 0xb2, 0x41, 0xcb, 0xd7, 0xcc, 0x8b, 0x22, 0x7a, 0xea, 0x52, 0x16, 0x06, 0xe1,
+	0x58, 0xf5, 0x66, 0x0d, 0xd7, 0x15, 0x6d, 0x57, 0x91, 0xd0, 0x43, 0x40, 0x59, 0x88, 0xab, 0xc7,
+	0xbe, 0x7e, 0x12, 0xdb, 0x19, 0x20, 0x56, 0xdb, 0xc7, 0x7d, 0x68, 0x6a, 0xb4, 0x5d, 0x80, 0xf4,
+	0xfb, 0xa8, 0x6f, 0xd9, 0xd6, 0xb4, 0x09, 0xc8, 0x2e, 0x6b, 0xe5, 0x0c, 0x68, 0x60, 0x96, 0xb2,
+	0x07, 0xd0, 0x22, 0x67, 0x31, 0xe5, 0x24, 0x45, 0xcd, 0x2b, 0x54, 0x53, 0x53, 0x2d, 0xec, 0x7d,
+	0xb9, 0xe9, 0x9f, 0xb9, 0x5e, 0x40, 0x54, 0x12, 0x6b, 0xb8, 0x32, 0xf2, 0xce, 0x36, 0x02, 0x82,
+	0x3e, 0x84, 0x6b, 0xfa, 0x12, 0x9f, 0x91, 0x21, 0x19, 0x8b, 0xd0, 0x8b, 0xb8, 0x7a, 0xec, 0xaa,
+	0xc6, 0xec, 0xcd, 0x09, 0x7d, 0xbd, 0xd8, 0x29, 0xf4, 0x9e, 0x7c, 0xfb, 0x8f, 0x3b, 0x85, 0xaf,
+	0x7e, 0xf4, 0x6e, 0xff, 0x06, 0x8a, 0x5f, 0x06, 0xe6, 0x5f, 0x41, 0x87, 0x15, 0xb5, 0xf4, 0x7e,
+	0xf4, 0x9f, 0x00, 0x00, 0x00, 0xff, 0xff, 0x9e, 0x62, 0x15, 0xc9, 0x15, 0x14, 0x00, 0x00,
 }
 
 func (this *Proxy) Equal(that interface{}) bool {
@@ -2069,6 +1943,9 @@ func (this *Listener) Equal(that interface{}) bool {
 	if !this.UseProxyProto.Equal(that1.UseProxyProto) {
 		return false
 	}
+	if !this.Plugins.Equal(that1.Plugins) {
+		return false
+	}
 	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
 		return false
 	}
@@ -2094,6 +1971,101 @@ func (this *Listener_HttpListener) Equal(that interface{}) bool {
 		return false
 	}
 	if !this.HttpListener.Equal(that1.HttpListener) {
+		return false
+	}
+	return true
+}
+func (this *Listener_TcpListener) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*Listener_TcpListener)
+	if !ok {
+		that2, ok := that.(Listener_TcpListener)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if !this.TcpListener.Equal(that1.TcpListener) {
+		return false
+	}
+	return true
+}
+func (this *TcpListener) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*TcpListener)
+	if !ok {
+		that2, ok := that.(TcpListener)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if len(this.TcpHosts) != len(that1.TcpHosts) {
+		return false
+	}
+	for i := range this.TcpHosts {
+		if !this.TcpHosts[i].Equal(that1.TcpHosts[i]) {
+			return false
+		}
+	}
+	if !this.Plugins.Equal(that1.Plugins) {
+		return false
+	}
+	if this.StatPrefix != that1.StatPrefix {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *TcpHost) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*TcpHost)
+	if !ok {
+		that2, ok := that.(TcpHost)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.Name != that1.Name {
+		return false
+	}
+	if !this.Destination.Equal(that1.Destination) {
+		return false
+	}
+	if !this.SslConfig.Equal(that1.SslConfig) {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
 		return false
 	}
 	return true
@@ -2126,6 +2098,9 @@ func (this *HttpListener) Equal(that interface{}) bool {
 		}
 	}
 	if !this.ListenerPlugins.Equal(that1.ListenerPlugins) {
+		return false
+	}
+	if this.StatPrefix != that1.StatPrefix {
 		return false
 	}
 	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
@@ -2214,6 +2189,9 @@ func (this *Route) Equal(that interface{}) bool {
 		return false
 	}
 	if !this.RoutePlugins.Equal(that1.RoutePlugins) {
+		return false
+	}
+	if !this.RouteMetadata.Equal(that1.RouteMetadata) {
 		return false
 	}
 	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
@@ -2450,6 +2428,9 @@ func (this *HeaderMatcher) Equal(that interface{}) bool {
 	if this.Regex != that1.Regex {
 		return false
 	}
+	if this.InvertMatch != that1.InvertMatch {
+		return false
+	}
 	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
 		return false
 	}
@@ -2656,14 +2637,14 @@ func (this *Destination_Upstream) Equal(that interface{}) bool {
 	}
 	return true
 }
-func (this *Destination_Service) Equal(that interface{}) bool {
+func (this *Destination_Kube) Equal(that interface{}) bool {
 	if that == nil {
 		return this == nil
 	}
 
-	that1, ok := that.(*Destination_Service)
+	that1, ok := that.(*Destination_Kube)
 	if !ok {
-		that2, ok := that.(Destination_Service)
+		that2, ok := that.(Destination_Kube)
 		if ok {
 			that1 = &that2
 		} else {
@@ -2675,19 +2656,43 @@ func (this *Destination_Service) Equal(that interface{}) bool {
 	} else if this == nil {
 		return false
 	}
-	if !this.Service.Equal(that1.Service) {
+	if !this.Kube.Equal(that1.Kube) {
 		return false
 	}
 	return true
 }
-func (this *ServiceDestination) Equal(that interface{}) bool {
+func (this *Destination_Consul) Equal(that interface{}) bool {
 	if that == nil {
 		return this == nil
 	}
 
-	that1, ok := that.(*ServiceDestination)
+	that1, ok := that.(*Destination_Consul)
 	if !ok {
-		that2, ok := that.(ServiceDestination)
+		that2, ok := that.(Destination_Consul)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if !this.Consul.Equal(that1.Consul) {
+		return false
+	}
+	return true
+}
+func (this *KubernetesServiceDestination) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*KubernetesServiceDestination)
+	if !ok {
+		that2, ok := that.(KubernetesServiceDestination)
 		if ok {
 			that1 = &that2
 		} else {
@@ -2704,6 +2709,49 @@ func (this *ServiceDestination) Equal(that interface{}) bool {
 	}
 	if this.Port != that1.Port {
 		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *ConsulServiceDestination) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*ConsulServiceDestination)
+	if !ok {
+		that2, ok := that.(ConsulServiceDestination)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.ServiceName != that1.ServiceName {
+		return false
+	}
+	if len(this.Tags) != len(that1.Tags) {
+		return false
+	}
+	for i := range this.Tags {
+		if this.Tags[i] != that1.Tags[i] {
+			return false
+		}
+	}
+	if len(this.DataCenters) != len(that1.DataCenters) {
+		return false
+	}
+	for i := range this.DataCenters {
+		if this.DataCenters[i] != that1.DataCenters[i] {
+			return false
+		}
 	}
 	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
 		return false
@@ -2803,6 +2851,12 @@ func (this *WeightedDestination) Equal(that interface{}) bool {
 		return false
 	}
 	if this.Weight != that1.Weight {
+		return false
+	}
+	if !this.WeighedDestinationPlugins.Equal(that1.WeighedDestinationPlugins) {
+		return false
+	}
+	if !this.WeightedDestinationPlugins.Equal(that1.WeightedDestinationPlugins) {
 		return false
 	}
 	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {

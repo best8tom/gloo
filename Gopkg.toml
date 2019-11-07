@@ -2,12 +2,16 @@
   go-tests = true
   unused-packages = true
 
+[[override]]
+  name = "gopkg.in/fsnotify.v1"
+  source = "https://github.com/fsnotify/fsnotify.git"
+
 [[constraint]]
-  version = ">=0.8.0"
+  version = ">=0.8.2"
   name = "github.com/envoyproxy/go-control-plane"
 
 [[constraint]]
-  version = "1.1.1"
+  version = "1.3.0"
   name = "github.com/gogo/protobuf"
 
 [[override]]
@@ -15,7 +19,7 @@
   name = "k8s.io/api"
 
 [[override]]
-  version = "1.2.0"
+  version = "1.3.1"
   name = "github.com/golang/protobuf"
 
 [[constraint]]
@@ -24,27 +28,30 @@
 
 [[constraint]]
   name = "github.com/solo-io/solo-kit"
-  version = "0.9.9"
+  version = "0.11.7"
 
-[[constraint]]
+[[override]]
   name = "github.com/solo-io/go-utils"
-  version = "0.8.18"
+  version = "0.10.25"
 
 [[constraint]]
   name = "github.com/hashicorp/consul"
-  revision = "eba25a143821cec25bdb48fe64dd7b7a6152d01d"
-
-# go versioning story not ideal, so we have to pin serf to the version consul expects
-[[override]]
-  name = "github.com/hashicorp/serf"
-  revision = "19bbd39e421bdf3559d5025fb2c760f5ffa56233"
+  version = "1.5.2"
 
 [[constraint]]
-  name = "github.com/solo-io/go-checkpoint"
-  version = "0.0.4"
+  name = "github.com/solo-io/reporting-client"
+  version = "0.0.2"
+
+[[constraint]]
+  name = "github.com/onsi/gomega"
+  version = "1.5.0"
 
 # make sure all kubernetes code is the same version.
 # when updating, update all in the same time.
+
+[[constraint]]
+  name = "github.com/aws/aws-sdk-go"
+  version = "1.20.6"
 
 [[override]]
   name = "k8s.io/kubernetes"
@@ -73,3 +80,26 @@
 [[override]]
   name = "k8s.io/helm"
   version = "v2.12.3"
+
+[[override]]
+  name = "github.com/go-openapi/spec"
+  version = "0.19.2"
+
+[[constraint]]
+  name = "knative.dev/serving"
+  version = "v0.8.0"
+
+# added to support knative v0.8.0
+[[override]]
+  name = "golang.org/x/net"
+  revision = "aaf60122140d3fcf75376d319f0554393160eb50"
+
+# added to support knative v0.8.0
+[[override]]
+  name = "golang.org/x/xerrors"
+  revision = "a985d3407aa71f30cf86696ee0a2f409709f22e1"
+
+[[override]]
+  name = "k8s.io/klog"
+  revision = "9cbb78b20423182f9e5b2a214dd255f5e117d2d1"
+  source = "github.com/stefanprodan/klog"

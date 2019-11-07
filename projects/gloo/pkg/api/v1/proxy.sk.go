@@ -3,6 +3,7 @@
 package v1
 
 import (
+	"log"
 	"sort"
 
 	"github.com/solo-io/go-utils/hashutils"
@@ -34,10 +35,16 @@ func (r *Proxy) SetStatus(status core.Status) {
 func (r *Proxy) Hash() uint64 {
 	metaCopy := r.GetMetadata()
 	metaCopy.ResourceVersion = ""
+	metaCopy.Generation = 0
+	// investigate zeroing out owner refs as well
 	return hashutils.HashAll(
 		metaCopy,
 		r.Listeners,
 	)
+}
+
+func (r *Proxy) GroupVersionKind() schema.GroupVersionKind {
+	return ProxyGVK
 }
 
 type ProxyList []*Proxy
@@ -121,8 +128,6 @@ func (list ProxyList) AsInterfaces() []interface{} {
 	return asInterfaces
 }
 
-var _ resources.Resource = &Proxy{}
-
 // Kubernetes Adapter for Proxy
 
 func (o *Proxy) GetObjectKind() schema.ObjectKind {
@@ -134,11 +139,32 @@ func (o *Proxy) DeepCopyObject() runtime.Object {
 	return resources.Clone(o).(*Proxy)
 }
 
-var ProxyCrd = crd.NewCrd("gloo.solo.io",
-	"proxies",
-	"gloo.solo.io",
-	"v1",
-	"Proxy",
-	"px",
-	false,
-	&Proxy{})
+func (o *Proxy) DeepCopyInto(out *Proxy) {
+	clone := resources.Clone(o).(*Proxy)
+	*out = *clone
+}
+
+var (
+	ProxyCrd = crd.NewCrd(
+		"proxies",
+		ProxyGVK.Group,
+		ProxyGVK.Version,
+		ProxyGVK.Kind,
+		"px",
+		false,
+		&Proxy{})
+)
+
+func init() {
+	if err := crd.AddCrd(ProxyCrd); err != nil {
+		log.Fatalf("could not add crd to global registry")
+	}
+}
+
+var (
+	ProxyGVK = schema.GroupVersionKind{
+		Version: "v1",
+		Group:   "gloo.solo.io",
+		Kind:    "Proxy",
+	}
+)

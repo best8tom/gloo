@@ -12,13 +12,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gogo/protobuf/proto"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	. "github.com/onsi/gomega/gstruct"
-
-	"github.com/gogo/protobuf/proto"
 	gloov1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1"
 	static_plugin_gloo "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/static"
+	testgrpcservice "github.com/solo-io/gloo/test/v1helpers/test_grpc_service"
 	"github.com/solo-io/solo-kit/pkg/api/v1/resources/core"
 )
 
@@ -27,24 +26,70 @@ type ReceivedRequest struct {
 	Body        []byte
 	Host        string
 	GRPCRequest proto.Message
+	Port        uint32
 }
 
 func NewTestHttpUpstream(ctx context.Context, addr string) *TestUpstream {
-	backendPort, responses := runTestServer(ctx)
-	return newTestUpstream(addr, backendPort, responses)
+	backendPort, responses := runTestServer(ctx, "")
+	return newTestUpstream(addr, []uint32{backendPort}, responses)
+}
+
+func NewTestHttpUpstreamWithReply(ctx context.Context, addr, reply string) *TestUpstream {
+	backendPort, responses := runTestServer(ctx, reply)
+	return newTestUpstream(addr, []uint32{backendPort}, responses)
+}
+
+func NewTestGRPCUpstream(ctx context.Context, addr string, replicas int) *TestUpstream {
+	grpcServices := make([]*testgrpcservice.TestGRPCServer, replicas)
+	for i := range grpcServices {
+		grpcServices[i] = testgrpcservice.RunServer(ctx)
+	}
+	received := make(chan *ReceivedRequest, 100)
+	for _, srv := range grpcServices {
+		srv := srv
+		go func() {
+			defer GinkgoRecover()
+			for r := range srv.C {
+				received <- &ReceivedRequest{GRPCRequest: r, Port: srv.Port}
+			}
+		}()
+	}
+	ports := make([]uint32, 0, len(grpcServices))
+	for _, v := range grpcServices {
+		ports = append(ports, v.Port)
+	}
+
+	us := newTestUpstream(addr, ports, received)
+	us.GrpcServers = grpcServices
+	return us
 }
 
 type TestUpstream struct {
-	Upstream *gloov1.Upstream
-	C        <-chan *ReceivedRequest
-	Address  string
-	Port     uint32
+	Upstream    *gloov1.Upstream
+	C           <-chan *ReceivedRequest
+	Address     string
+	Port        uint32
+	GrpcServers []*testgrpcservice.TestGRPCServer
+}
+
+func (tu *TestUpstream) FailGrpcHealthCheck() *testgrpcservice.TestGRPCServer {
+	for _, v := range tu.GrpcServers[:len(tu.GrpcServers)-1] {
+		v.HealthChecker.Fail()
+	}
+	return tu.GrpcServers[len(tu.GrpcServers)-1]
 }
 
 var id = 0
 
-func newTestUpstream(addr string, port uint32, responses <-chan *ReceivedRequest) *TestUpstream {
+func newTestUpstream(addr string, ports []uint32, responses <-chan *ReceivedRequest) *TestUpstream {
 	id += 1
+	hosts := make([]*static_plugin_gloo.Host, len(ports))
+	for i, port := range ports {
+		hosts[i] = &static_plugin_gloo.Host{
+			Addr: addr,
+			Port: port,
+		}
+	}
 	u := &gloov1.Upstream{
 		Metadata: core.Metadata{
 			Name:      fmt.Sprintf("local-%d", id),
@@ -53,10 +98,7 @@ func newTestUpstream(addr string, port uint32, responses <-chan *ReceivedRequest
 		UpstreamSpec: &gloov1.UpstreamSpec{
 			UpstreamType: &gloov1.UpstreamSpec_Static{
 				Static: &static_plugin_gloo.UpstreamSpec{
-					Hosts: []*static_plugin_gloo.Host{{
-						Addr: addr,
-						Port: port,
-					}},
+					Hosts: hosts,
 				},
 			},
 		},
@@ -65,17 +107,18 @@ func newTestUpstream(addr string, port uint32, responses <-chan *ReceivedRequest
 	return &TestUpstream{
 		Upstream: u,
 		C:        responses,
-		Address:  fmt.Sprintf("%s:%d", addr, port),
-		Port:     port,
+		Port:     ports[0],
 	}
 }
 
-func runTestServer(ctx context.Context) (uint32, <-chan *ReceivedRequest) {
+func runTestServer(ctx context.Context, reply string) (uint32, <-chan *ReceivedRequest) {
 	bodyChan := make(chan *ReceivedRequest, 100)
 	handlerFunc := func(rw http.ResponseWriter, r *http.Request) {
 		var rr ReceivedRequest
 		rr.Method = r.Method
-		if r.Body != nil {
+		if reply != "" {
+			_, _ = rw.Write([]byte(reply))
+		} else if r.Body != nil {
 			body, _ := ioutil.ReadAll(r.Body)
 			_ = r.Body.Close()
 			if len(body) != 0 {
@@ -105,10 +148,15 @@ func runTestServer(ctx context.Context) (uint32, <-chan *ReceivedRequest) {
 		panic(err)
 	}
 
-	handler := http.HandlerFunc(handlerFunc)
+	mux := http.NewServeMux()
+	mux.Handle("/", http.HandlerFunc(handlerFunc))
+	mux.Handle("/health", http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		rw.Write([]byte("OK"))
+	}))
+
 	go func() {
 		defer GinkgoRecover()
-		h := &http.Server{Handler: handler}
+		h := &http.Server{Handler: mux}
 		go func() {
 			defer GinkgoRecover()
 			if err := h.Serve(listener); err != nil {
@@ -131,7 +179,31 @@ func runTestServer(ctx context.Context) (uint32, <-chan *ReceivedRequest) {
 func TestUpstreamReachable(envoyPort uint32, tu *TestUpstream, rootca *string) {
 	body := []byte("solo.io test")
 
-	EventuallyWithOffset(1, func() error {
+	ExpectHttpOK(body, rootca, envoyPort, "")
+
+	timeout := time.After(5 * time.Second)
+	var receivedRequest *ReceivedRequest
+	for {
+		select {
+		case <-timeout:
+			if receivedRequest != nil {
+				fmt.Fprintf(GinkgoWriter, "last received request: %v", *receivedRequest)
+			}
+			Fail("timeout testing upstream reachability")
+		case receivedRequest = <-tu.C:
+			if receivedRequest.Method == "POST" &&
+				bytes.Equal(receivedRequest.Body, body) {
+				return
+			}
+		}
+	}
+
+}
+
+func ExpectHttpOK(body []byte, rootca *string, envoyPort uint32, response string) {
+
+	var res *http.Response
+	EventuallyWithOffset(2, func() error {
 		// send a request with a body
 		var buf bytes.Buffer
 		buf.Write(body)
@@ -155,18 +227,22 @@ func TestUpstreamReachable(envoyPort uint32, tu *TestUpstream, rootca *string) {
 			}
 		}
 
-		res, err := client.Post(fmt.Sprintf("%s://%s:%d/1", scheme, "localhost", envoyPort), "application/octet-stream", &buf)
+		var err error
+		res, err = client.Post(fmt.Sprintf("%s://%s:%d/1", scheme, "localhost", envoyPort), "application/octet-stream", &buf)
 		if err != nil {
 			return err
 		}
 		if res.StatusCode != http.StatusOK {
 			return fmt.Errorf("%v is not OK", res.StatusCode)
 		}
+
 		return nil
 	}, "10s", ".5s").Should(BeNil())
 
-	EventuallyWithOffset(1, tu.C).Should(Receive(PointTo(MatchFields(IgnoreExtras, Fields{
-		"Method": Equal("POST"),
-		"Body":   Equal(body),
-	}))))
+	if response != "" {
+		body, err := ioutil.ReadAll(res.Body)
+		ExpectWithOffset(2, err).NotTo(HaveOccurred())
+		defer res.Body.Close()
+		ExpectWithOffset(2, string(body)).To(Equal(response))
+	}
 }

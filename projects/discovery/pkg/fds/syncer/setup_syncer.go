@@ -3,6 +3,8 @@ package syncer
 import (
 	"time"
 
+	"github.com/solo-io/solo-kit/pkg/api/v1/clients"
+
 	"github.com/solo-io/gloo/projects/discovery/pkg/fds"
 	"github.com/solo-io/gloo/projects/discovery/pkg/fds/discoveries/aws"
 	"github.com/solo-io/gloo/projects/discovery/pkg/fds/discoveries/grpc"
@@ -12,9 +14,18 @@ import (
 	"github.com/solo-io/gloo/projects/gloo/pkg/plugins/registry"
 	"github.com/solo-io/go-utils/contextutils"
 	"github.com/solo-io/go-utils/errutils"
+	"github.com/solo-io/solo-kit/pkg/api/external/kubernetes/namespace"
+	skkube "github.com/solo-io/solo-kit/pkg/api/v1/resources/common/kubernetes"
 )
 
 func RunFDS(opts bootstrap.Opts) error {
+	fdsMode := getFdsMode(opts.Settings)
+	if fdsMode == v1.Settings_DiscoveryOptions_DISABLED {
+		contextutils.LoggerFrom(opts.WatchOpts.Ctx).Info("function discovery disabled. to enable, modify "+
+			"gloo.solo.io/Settings %v", opts.Settings.GetMetadata().Ref())
+		return nil
+	}
+
 	watchOpts := opts.WatchOpts.WithDefaults()
 	watchOpts.Ctx = contextutils.WithLogger(watchOpts.Ctx, "fds")
 
@@ -33,7 +44,14 @@ func RunFDS(opts bootstrap.Opts) error {
 		return err
 	}
 
-	cache := v1.NewDiscoveryEmitter(upstreamClient, secretClient)
+	var nsClient skkube.KubeNamespaceClient
+	if opts.KubeClient != nil && opts.KubeCoreCache.NamespaceLister() != nil {
+		nsClient = namespace.NewNamespaceClient(opts.KubeClient, opts.KubeCoreCache)
+	} else {
+		nsClient = &FakeKubeNamespaceWatcher{}
+	}
+
+	cache := v1.NewDiscoveryEmitter(upstreamClient, nsClient, secretClient)
 
 	var resolvers fds.Resolvers
 	for _, plug := range registry.Plugins(opts) {
@@ -62,7 +80,7 @@ func RunFDS(opts bootstrap.Opts) error {
 	updater := fds.NewUpdater(watchOpts.Ctx, resolvers, upstreamClient, 0, functionalPlugins)
 	disc := fds.NewFunctionDiscovery(updater)
 
-	sync := NewDiscoverySyncer(disc)
+	sync := NewDiscoverySyncer(disc, fdsMode)
 	eventLoop := v1.NewDiscoveryEventLoop(cache, sync)
 
 	errs := make(chan error)
@@ -87,4 +105,38 @@ func RunFDS(opts bootstrap.Opts) error {
 		}
 	}()
 	return nil
+}
+
+func getFdsMode(settings *v1.Settings) v1.Settings_DiscoveryOptions_FdsMode {
+	if settings == nil || settings.GetDiscovery() == nil {
+		return v1.Settings_DiscoveryOptions_BLACKLIST
+	}
+	return settings.GetDiscovery().GetFdsMode()
+}
+
+// TODO: consider using regular solo-kit namespace client instead of KubeNamespace client
+// to eliminate the need for this fake client for non kube environments
+type FakeKubeNamespaceWatcher struct{}
+
+func (f *FakeKubeNamespaceWatcher) Watch(opts clients.WatchOpts) (<-chan skkube.KubeNamespaceList, <-chan error, error) {
+	return nil, nil, nil
+}
+func (f *FakeKubeNamespaceWatcher) BaseClient() clients.ResourceClient {
+	return nil
+
+}
+func (f *FakeKubeNamespaceWatcher) Register() error {
+	return nil
+}
+func (f *FakeKubeNamespaceWatcher) Read(name string, opts clients.ReadOpts) (*skkube.KubeNamespace, error) {
+	return nil, nil
+}
+func (f *FakeKubeNamespaceWatcher) Write(resource *skkube.KubeNamespace, opts clients.WriteOpts) (*skkube.KubeNamespace, error) {
+	return nil, nil
+}
+func (f *FakeKubeNamespaceWatcher) Delete(name string, opts clients.DeleteOpts) error {
+	return nil
+}
+func (f *FakeKubeNamespaceWatcher) List(opts clients.ListOpts) (skkube.KubeNamespaceList, error) {
+	return nil, nil
 }

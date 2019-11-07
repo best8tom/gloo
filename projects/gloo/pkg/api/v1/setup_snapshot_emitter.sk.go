@@ -10,39 +10,75 @@ import (
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/tag"
 
-	"github.com/solo-io/go-utils/errutils"
 	"github.com/solo-io/solo-kit/pkg/api/v1/clients"
 	"github.com/solo-io/solo-kit/pkg/errors"
+	skstats "github.com/solo-io/solo-kit/pkg/stats"
+
+	"github.com/solo-io/go-utils/errutils"
 )
 
 var (
-	mSetupSnapshotIn  = stats.Int64("setup.gloo.solo.io/snap_emitter/snap_in", "The number of snapshots in", "1")
-	mSetupSnapshotOut = stats.Int64("setup.gloo.solo.io/snap_emitter/snap_out", "The number of snapshots out", "1")
+	// Deprecated. See mSetupResourcesIn
+	mSetupSnapshotIn = stats.Int64("setup.gloo.solo.io/emitter/snap_in", "Deprecated. Use setup.gloo.solo.io/emitter/resources_in. The number of snapshots in", "1")
 
+	// metrics for emitter
+	mSetupResourcesIn    = stats.Int64("setup.gloo.solo.io/emitter/resources_in", "The number of resource lists received on open watch channels", "1")
+	mSetupSnapshotOut    = stats.Int64("setup.gloo.solo.io/emitter/snap_out", "The number of snapshots out", "1")
+	mSetupSnapshotMissed = stats.Int64("setup.gloo.solo.io/emitter/snap_missed", "The number of snapshots missed", "1")
+
+	// views for emitter
+	// deprecated: see setupResourcesInView
 	setupsnapshotInView = &view.View{
-		Name:        "setup.gloo.solo.io_snap_emitter/snap_in",
+		Name:        "setup.gloo.solo.io/emitter/snap_in",
 		Measure:     mSetupSnapshotIn,
-		Description: "The number of snapshots updates coming in",
+		Description: "Deprecated. Use setup.gloo.solo.io/emitter/resources_in. The number of snapshots updates coming in.",
 		Aggregation: view.Count(),
 		TagKeys:     []tag.Key{},
 	}
+
+	setupResourcesInView = &view.View{
+		Name:        "setup.gloo.solo.io/emitter/resources_in",
+		Measure:     mSetupResourcesIn,
+		Description: "The number of resource lists received on open watch channels",
+		Aggregation: view.Count(),
+		TagKeys: []tag.Key{
+			skstats.NamespaceKey,
+			skstats.ResourceKey,
+		},
+	}
 	setupsnapshotOutView = &view.View{
-		Name:        "setup.gloo.solo.io/snap_emitter/snap_out",
+		Name:        "setup.gloo.solo.io/emitter/snap_out",
 		Measure:     mSetupSnapshotOut,
 		Description: "The number of snapshots updates going out",
+		Aggregation: view.Count(),
+		TagKeys:     []tag.Key{},
+	}
+	setupsnapshotMissedView = &view.View{
+		Name:        "setup.gloo.solo.io/emitter/snap_missed",
+		Measure:     mSetupSnapshotMissed,
+		Description: "The number of snapshots updates going missed. this can happen in heavy load. missed snapshot will be re-tried after a second.",
 		Aggregation: view.Count(),
 		TagKeys:     []tag.Key{},
 	}
 )
 
 func init() {
-	view.Register(setupsnapshotInView, setupsnapshotOutView)
+	view.Register(
+		setupsnapshotInView,
+		setupsnapshotOutView,
+		setupsnapshotMissedView,
+		setupResourcesInView,
+	)
+}
+
+type SetupSnapshotEmitter interface {
+	Snapshots(watchNamespaces []string, opts clients.WatchOpts) (<-chan *SetupSnapshot, <-chan error, error)
 }
 
 type SetupEmitter interface {
+	SetupSnapshotEmitter
 	Register() error
 	Settings() SettingsClient
-	Snapshots(watchNamespaces []string, opts clients.WatchOpts) (<-chan *SetupSnapshot, <-chan error, error)
 }
 
 func NewSetupEmitter(settingsClient SettingsClient) SetupEmitter {
@@ -95,8 +131,19 @@ func (c *setupEmitter) Snapshots(watchNamespaces []string, opts clients.WatchOpt
 	}
 	settingsChan := make(chan settingsListWithNamespace)
 
+	var initialSettingsList SettingsList
+
+	currentSnapshot := SetupSnapshot{}
+
 	for _, namespace := range watchNamespaces {
 		/* Setup namespaced watch for Settings */
+		{
+			settings, err := c.settings.List(namespace, clients.ListOpts{Ctx: opts.Ctx, Selector: opts.Selector})
+			if err != nil {
+				return nil, nil, errors.Wrapf(err, "initial Settings list")
+			}
+			initialSettingsList = append(initialSettingsList, settings...)
+		}
 		settingsNamespacesChan, settingsErrs, err := c.settings.Watch(namespace, opts)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "starting Settings watch")
@@ -124,21 +171,31 @@ func (c *setupEmitter) Snapshots(watchNamespaces []string, opts clients.WatchOpt
 			}
 		}(namespace)
 	}
+	/* Initialize snapshot for Settings */
+	currentSnapshot.Settings = initialSettingsList.Sort()
 
 	snapshots := make(chan *SetupSnapshot)
 	go func() {
-		originalSnapshot := SetupSnapshot{}
-		currentSnapshot := originalSnapshot.Clone()
+		// sent initial snapshot to kick off the watch
+		initialSnapshot := currentSnapshot.Clone()
+		snapshots <- &initialSnapshot
+
 		timer := time.NewTicker(time.Second * 1)
+		previousHash := currentSnapshot.Hash()
 		sync := func() {
-			if originalSnapshot.Hash() == currentSnapshot.Hash() {
+			currentHash := currentSnapshot.Hash()
+			if previousHash == currentHash {
 				return
 			}
 
-			stats.Record(ctx, mSetupSnapshotOut.M(1))
-			originalSnapshot = currentSnapshot.Clone()
 			sentSnapshot := currentSnapshot.Clone()
-			snapshots <- &sentSnapshot
+			select {
+			case snapshots <- &sentSnapshot:
+				stats.Record(ctx, mSetupSnapshotOut.M(1))
+				previousHash = currentHash
+			default:
+				stats.Record(ctx, mSetupSnapshotMissed.M(1))
+			}
 		}
 		settingsByNamespace := make(map[string]SettingsList)
 
@@ -160,6 +217,13 @@ func (c *setupEmitter) Snapshots(watchNamespaces []string, opts clients.WatchOpt
 				record()
 
 				namespace := settingsNamespacedList.namespace
+
+				skstats.IncrementResourceCount(
+					ctx,
+					namespace,
+					"settings",
+					mSetupResourcesIn,
+				)
 
 				// merge lists by namespace
 				settingsByNamespace[namespace] = settingsNamespacedList.list

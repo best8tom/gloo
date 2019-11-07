@@ -2,6 +2,7 @@ package virtualservice
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/solo-io/gloo/pkg/cliutil"
 	"github.com/solo-io/gloo/projects/gloo/cli/pkg/cmd/edit/options"
@@ -45,6 +46,7 @@ func RootCmd(opts *options.EditOptions, optionsFunc ...cliutils.OptionsFunc) *co
 
 	addEditVirtualServiceOptions(cmd.Flags(), optsExt)
 	cliutils.ApplyOptions(cmd, optionsFunc)
+	cmd.AddCommand(RateLimitConfig(opts, optionsFunc...))
 	return cmd
 }
 
@@ -82,9 +84,6 @@ func editVirtualService(opts *options.EditOptions, optsExt *EditVirtualService, 
 			return fmt.Errorf("conflict - resource version does not match")
 		}
 	}
-	if vs.SslConfig == nil {
-		vs.SslConfig = &gloov1.SslConfig{}
-	}
 
 	if optsExt.Remove {
 		vs.SslConfig = nil
@@ -104,7 +103,11 @@ func editVirtualService(opts *options.EditOptions, optsExt *EditVirtualService, 
 		if optsExt.SniDomains != nil {
 			vs.SslConfig.SniDomains = optsExt.SniDomains
 		}
+		if reflect.DeepEqual(*vs.SslConfig, gloov1.SslConfig{}) {
+			vs.SslConfig = nil
+		}
 	}
+
 	_, err = vsClient.Write(vs, clients.WriteOpts{OverwriteExisting: true})
 	return err
 }

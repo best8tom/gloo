@@ -10,40 +10,76 @@ import (
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/tag"
 
-	"github.com/solo-io/go-utils/errutils"
 	"github.com/solo-io/solo-kit/pkg/api/v1/clients"
 	"github.com/solo-io/solo-kit/pkg/errors"
+	skstats "github.com/solo-io/solo-kit/pkg/stats"
+
+	"github.com/solo-io/go-utils/errutils"
 )
 
 var (
-	mStatusSnapshotIn  = stats.Int64("status.ingress.solo.io/snap_emitter/snap_in", "The number of snapshots in", "1")
-	mStatusSnapshotOut = stats.Int64("status.ingress.solo.io/snap_emitter/snap_out", "The number of snapshots out", "1")
+	// Deprecated. See mStatusResourcesIn
+	mStatusSnapshotIn = stats.Int64("status.ingress.solo.io/emitter/snap_in", "Deprecated. Use status.ingress.solo.io/emitter/resources_in. The number of snapshots in", "1")
 
+	// metrics for emitter
+	mStatusResourcesIn    = stats.Int64("status.ingress.solo.io/emitter/resources_in", "The number of resource lists received on open watch channels", "1")
+	mStatusSnapshotOut    = stats.Int64("status.ingress.solo.io/emitter/snap_out", "The number of snapshots out", "1")
+	mStatusSnapshotMissed = stats.Int64("status.ingress.solo.io/emitter/snap_missed", "The number of snapshots missed", "1")
+
+	// views for emitter
+	// deprecated: see statusResourcesInView
 	statussnapshotInView = &view.View{
-		Name:        "status.ingress.solo.io_snap_emitter/snap_in",
+		Name:        "status.ingress.solo.io/emitter/snap_in",
 		Measure:     mStatusSnapshotIn,
-		Description: "The number of snapshots updates coming in",
+		Description: "Deprecated. Use status.ingress.solo.io/emitter/resources_in. The number of snapshots updates coming in.",
 		Aggregation: view.Count(),
 		TagKeys:     []tag.Key{},
 	}
+
+	statusResourcesInView = &view.View{
+		Name:        "status.ingress.solo.io/emitter/resources_in",
+		Measure:     mStatusResourcesIn,
+		Description: "The number of resource lists received on open watch channels",
+		Aggregation: view.Count(),
+		TagKeys: []tag.Key{
+			skstats.NamespaceKey,
+			skstats.ResourceKey,
+		},
+	}
 	statussnapshotOutView = &view.View{
-		Name:        "status.ingress.solo.io/snap_emitter/snap_out",
+		Name:        "status.ingress.solo.io/emitter/snap_out",
 		Measure:     mStatusSnapshotOut,
 		Description: "The number of snapshots updates going out",
+		Aggregation: view.Count(),
+		TagKeys:     []tag.Key{},
+	}
+	statussnapshotMissedView = &view.View{
+		Name:        "status.ingress.solo.io/emitter/snap_missed",
+		Measure:     mStatusSnapshotMissed,
+		Description: "The number of snapshots updates going missed. this can happen in heavy load. missed snapshot will be re-tried after a second.",
 		Aggregation: view.Count(),
 		TagKeys:     []tag.Key{},
 	}
 )
 
 func init() {
-	view.Register(statussnapshotInView, statussnapshotOutView)
+	view.Register(
+		statussnapshotInView,
+		statussnapshotOutView,
+		statussnapshotMissedView,
+		statusResourcesInView,
+	)
+}
+
+type StatusSnapshotEmitter interface {
+	Snapshots(watchNamespaces []string, opts clients.WatchOpts) (<-chan *StatusSnapshot, <-chan error, error)
 }
 
 type StatusEmitter interface {
+	StatusSnapshotEmitter
 	Register() error
 	KubeService() KubeServiceClient
 	Ingress() IngressClient
-	Snapshots(watchNamespaces []string, opts clients.WatchOpts) (<-chan *StatusSnapshot, <-chan error, error)
 }
 
 func NewStatusEmitter(kubeServiceClient KubeServiceClient, ingressClient IngressClient) StatusEmitter {
@@ -104,6 +140,8 @@ func (c *statusEmitter) Snapshots(watchNamespaces []string, opts clients.WatchOp
 		namespace string
 	}
 	kubeServiceChan := make(chan kubeServiceListWithNamespace)
+
+	var initialKubeServiceList KubeServiceList
 	/* Create channel for Ingress */
 	type ingressListWithNamespace struct {
 		list      IngressList
@@ -111,8 +149,19 @@ func (c *statusEmitter) Snapshots(watchNamespaces []string, opts clients.WatchOp
 	}
 	ingressChan := make(chan ingressListWithNamespace)
 
+	var initialIngressList IngressList
+
+	currentSnapshot := StatusSnapshot{}
+
 	for _, namespace := range watchNamespaces {
 		/* Setup namespaced watch for KubeService */
+		{
+			services, err := c.kubeService.List(namespace, clients.ListOpts{Ctx: opts.Ctx, Selector: opts.Selector})
+			if err != nil {
+				return nil, nil, errors.Wrapf(err, "initial KubeService list")
+			}
+			initialKubeServiceList = append(initialKubeServiceList, services...)
+		}
 		kubeServiceNamespacesChan, kubeServiceErrs, err := c.kubeService.Watch(namespace, opts)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "starting KubeService watch")
@@ -124,6 +173,13 @@ func (c *statusEmitter) Snapshots(watchNamespaces []string, opts clients.WatchOp
 			errutils.AggregateErrs(ctx, errs, kubeServiceErrs, namespace+"-services")
 		}(namespace)
 		/* Setup namespaced watch for Ingress */
+		{
+			ingresses, err := c.ingress.List(namespace, clients.ListOpts{Ctx: opts.Ctx, Selector: opts.Selector})
+			if err != nil {
+				return nil, nil, errors.Wrapf(err, "initial Ingress list")
+			}
+			initialIngressList = append(initialIngressList, ingresses...)
+		}
 		ingressNamespacesChan, ingressErrs, err := c.ingress.Watch(namespace, opts)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "starting Ingress watch")
@@ -157,21 +213,33 @@ func (c *statusEmitter) Snapshots(watchNamespaces []string, opts clients.WatchOp
 			}
 		}(namespace)
 	}
+	/* Initialize snapshot for Services */
+	currentSnapshot.Services = initialKubeServiceList.Sort()
+	/* Initialize snapshot for Ingresses */
+	currentSnapshot.Ingresses = initialIngressList.Sort()
 
 	snapshots := make(chan *StatusSnapshot)
 	go func() {
-		originalSnapshot := StatusSnapshot{}
-		currentSnapshot := originalSnapshot.Clone()
+		// sent initial snapshot to kick off the watch
+		initialSnapshot := currentSnapshot.Clone()
+		snapshots <- &initialSnapshot
+
 		timer := time.NewTicker(time.Second * 1)
+		previousHash := currentSnapshot.Hash()
 		sync := func() {
-			if originalSnapshot.Hash() == currentSnapshot.Hash() {
+			currentHash := currentSnapshot.Hash()
+			if previousHash == currentHash {
 				return
 			}
 
-			stats.Record(ctx, mStatusSnapshotOut.M(1))
-			originalSnapshot = currentSnapshot.Clone()
 			sentSnapshot := currentSnapshot.Clone()
-			snapshots <- &sentSnapshot
+			select {
+			case snapshots <- &sentSnapshot:
+				stats.Record(ctx, mStatusSnapshotOut.M(1))
+				previousHash = currentHash
+			default:
+				stats.Record(ctx, mStatusSnapshotMissed.M(1))
+			}
 		}
 		servicesByNamespace := make(map[string]KubeServiceList)
 		ingressesByNamespace := make(map[string]IngressList)
@@ -195,6 +263,13 @@ func (c *statusEmitter) Snapshots(watchNamespaces []string, opts clients.WatchOp
 
 				namespace := kubeServiceNamespacedList.namespace
 
+				skstats.IncrementResourceCount(
+					ctx,
+					namespace,
+					"kube_service",
+					mStatusResourcesIn,
+				)
+
 				// merge lists by namespace
 				servicesByNamespace[namespace] = kubeServiceNamespacedList.list
 				var kubeServiceList KubeServiceList
@@ -206,6 +281,13 @@ func (c *statusEmitter) Snapshots(watchNamespaces []string, opts clients.WatchOp
 				record()
 
 				namespace := ingressNamespacedList.namespace
+
+				skstats.IncrementResourceCount(
+					ctx,
+					namespace,
+					"ingress",
+					mStatusResourcesIn,
+				)
 
 				// merge lists by namespace
 				ingressesByNamespace[namespace] = ingressNamespacedList.list

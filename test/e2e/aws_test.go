@@ -89,7 +89,7 @@ var _ = Describe("AWS Lambda", func() {
 							},
 						},
 						Region:    region,
-						SecretRef: secret.Metadata.Ref(),
+						SecretRef: utils.ResourceRefPtr(secret.Metadata.Ref()),
 					},
 				},
 			},
@@ -267,7 +267,7 @@ var _ = Describe("AWS Lambda", func() {
 	})
 
 	It("be able to call lambda via gateway", func() {
-		err := envoyInstance.RunWithRole("gloo-system~gateway-proxy", testClients.GlooPort)
+		err := envoyInstance.RunWithRole("gloo-system~gateway-proxy-v2", testClients.GlooPort)
 		Expect(err).NotTo(HaveOccurred())
 
 		vs := &gw1.VirtualService{
@@ -275,16 +275,15 @@ var _ = Describe("AWS Lambda", func() {
 				Name:      "app",
 				Namespace: "default",
 			},
-			VirtualHost: &gloov1.VirtualHost{
-				Name:    "app",
+			VirtualHost: &gw1.VirtualHost{
 				Domains: []string{"*"},
-				Routes: []*gloov1.Route{{
+				Routes: []*gw1.Route{{
 					Matcher: &gloov1.Matcher{
 						PathSpecifier: &gloov1.Matcher_Prefix{
 							Prefix: "/",
 						},
 					},
-					Action: &gloov1.Route_RouteAction{
+					Action: &gw1.Route_RouteAction{
 						RouteAction: &gloov1.RouteAction{
 							Destination: &gloov1.RouteAction_Single{
 								Single: &gloov1.Destination{
@@ -310,21 +309,6 @@ var _ = Describe("AWS Lambda", func() {
 		_, err = testClients.VirtualServiceClient.Write(vs, opts)
 		Expect(err).NotTo(HaveOccurred())
 
-		/* // TODO(yuval-k): i dont think we need this as we can use the default gateway.
-
-		gateway := &gw1.Gateway{
-			Metadata: core.Metadata{
-				Name:      "ingress",
-				Namespace: "default",
-			},
-			VirtualServices: []core.ResourceRef{vs.Metadata.Ref()},
-			BindPort:        envoyPort,
-			BindAddress:     "127.0.0.1",
-		}
-
-		_, err = testClients.GatewayClient.Write(gateway, opts)
-		Expect(err).NotTo(HaveOccurred())
-		*/
 		validateLambdaUppercase(defaults.HttpPort)
 	})
 })

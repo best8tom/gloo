@@ -2,19 +2,33 @@ package syncer
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/solo-io/gloo/projects/gloo/pkg/api/v2/enterprise/plugins/ratelimit"
+	"github.com/solo-io/gloo/projects/gloo/pkg/plugins"
+	"github.com/solo-io/gloo/projects/metrics/pkg/metricsservice"
+	"github.com/solo-io/gloo/projects/metrics/pkg/runner"
+
+	"github.com/solo-io/gloo/projects/gloo/pkg/validation"
+
+	consulapi "github.com/hashicorp/consul/api"
+	vaultapi "github.com/hashicorp/vault/api"
+	extauth "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/enterprise/plugins/extauth/v1"
+	"github.com/solo-io/gloo/projects/gloo/pkg/upstreams/consul"
 
 	"github.com/solo-io/gloo/projects/gloo/pkg/upstreams"
+	sslutils "github.com/solo-io/gloo/projects/gloo/pkg/utils"
 
 	corecache "github.com/solo-io/solo-kit/pkg/api/v1/clients/kube/cache"
-
-	"github.com/solo-io/gloo/projects/gloo/pkg/plugins"
 
 	"github.com/gogo/protobuf/types"
 	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
 	"github.com/solo-io/gloo/pkg/utils"
+	"github.com/solo-io/gloo/pkg/utils/channelutils"
 	"github.com/solo-io/gloo/pkg/utils/setuputils"
 	v1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1"
 	"github.com/solo-io/gloo/projects/gloo/pkg/bootstrap"
@@ -30,7 +44,7 @@ import (
 	"github.com/solo-io/solo-kit/pkg/api/v1/clients/kube"
 	"github.com/solo-io/solo-kit/pkg/api/v1/clients/memory"
 	xdsserver "github.com/solo-io/solo-kit/pkg/api/v1/control-plane/server"
-	"github.com/solo-io/solo-kit/pkg/api/v1/reporter"
+	"github.com/solo-io/solo-kit/pkg/api/v2/reporter"
 	"github.com/solo-io/solo-kit/pkg/errors"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
@@ -43,6 +57,8 @@ import (
 	"google.golang.org/grpc"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	"google.golang.org/grpc/reflection"
 )
 
 type RunFunc func(opts bootstrap.Opts) error
@@ -68,7 +84,7 @@ func NewSetupFuncWithRun(runFunc RunFunc) setuputils.SetupFunc {
 func NewSetupFuncWithRunAndExtensions(runFunc RunFunc, extensions *Extensions) setuputils.SetupFunc {
 	s := &setupSyncer{
 		extensions: extensions,
-		grpcServer: func(ctx context.Context) *grpc.Server {
+		makeGrpcServer: func(ctx context.Context) *grpc.Server {
 			return grpc.NewServer(grpc.StreamInterceptor(
 				grpc_middleware.ChainStreamServer(
 					grpc_ctxtags.StreamServerInterceptor(),
@@ -85,42 +101,102 @@ func NewSetupFuncWithRunAndExtensions(runFunc RunFunc, extensions *Extensions) s
 	return s.Setup
 }
 
-type setupSyncer struct {
-	extensions         *Extensions
-	runFunc            RunFunc
-	grpcServer         func(ctx context.Context) *grpc.Server
-	previousBindAddr   string
-	controlPlane       bootstrap.ControlPlane
-	cancelControlPlane context.CancelFunc
-	callbacks          xdsserver.Callbacks
+type grpcServer struct {
+	addr   string
+	cancel context.CancelFunc
 }
 
-func NewControlPlane(ctx context.Context, grpcServer *grpc.Server, callbacks xdsserver.Callbacks, start bool) bootstrap.ControlPlane {
-	var c bootstrap.ControlPlane
-	c.GrpcServer = grpcServer
+type setupSyncer struct {
+	extensions               *Extensions
+	runFunc                  RunFunc
+	makeGrpcServer           func(ctx context.Context) *grpc.Server
+	previousXdsServer        grpcServer
+	previousValidationServer grpcServer
+	controlPlane             bootstrap.ControlPlane
+	validationServer         bootstrap.ValidationServer
+	callbacks                xdsserver.Callbacks
+}
+
+func NewControlPlane(ctx context.Context, grpcServer *grpc.Server, bindAddr net.Addr, callbacks xdsserver.Callbacks, start bool) bootstrap.ControlPlane {
 	hasher := &xds.ProxyKeyHasher{}
 	snapshotCache := cache.NewSnapshotCache(true, hasher, contextutils.LoggerFrom(ctx))
 	xdsServer := server.NewServer(snapshotCache, callbacks)
-	envoyv2.RegisterAggregatedDiscoveryServiceServer(c.GrpcServer, xdsServer)
-	c.SnapshotCache = snapshotCache
-	c.XDSServer = xdsServer
-	c.StartGrpcServer = start
-	return c
+	envoyv2.RegisterAggregatedDiscoveryServiceServer(grpcServer, xdsServer)
+	reflection.Register(grpcServer)
+
+	return bootstrap.ControlPlane{
+		GrpcService: &bootstrap.GrpcService{
+			GrpcServer:      grpcServer,
+			StartGrpcServer: start,
+			BindAddr:        bindAddr,
+			Ctx:             ctx,
+		},
+		SnapshotCache: snapshotCache,
+		XDSServer:     xdsServer,
+	}
+}
+
+func NewValidationServer(ctx context.Context, grpcServer *grpc.Server, bindAddr net.Addr, start bool) bootstrap.ValidationServer {
+	return bootstrap.ValidationServer{
+		GrpcService: &bootstrap.GrpcService{
+			GrpcServer:      grpcServer,
+			StartGrpcServer: start,
+			BindAddr:        bindAddr,
+			Ctx:             ctx,
+		},
+		Server: validation.NewValidationServer(),
+	}
+}
+
+var (
+	DefaultXdsBindAddr        = fmt.Sprintf("0.0.0.0:%v", defaults.GlooXdsPort)
+	DefaultValidationBindAddr = fmt.Sprintf("0.0.0.0:%v", defaults.GlooValidationPort)
+)
+
+func getAddr(addr string) (*net.TCPAddr, error) {
+	addrParts := strings.Split(addr, ":")
+	if len(addrParts) != 2 {
+		return nil, errors.Errorf("invalid bind addr: %v", addr)
+	}
+	ip := net.ParseIP(addrParts[0])
+
+	port, err := strconv.Atoi(addrParts[1])
+	if err != nil {
+		return nil, errors.Wrapf(err, "invalid bind addr: %v", addr)
+	}
+
+	return &net.TCPAddr{IP: ip, Port: port}, nil
 }
 
 func (s *setupSyncer) Setup(ctx context.Context, kubeCache kube.SharedCache, memCache memory.InMemoryResourceCache, settings *v1.Settings) error {
 
-	ipPort := strings.Split(settings.BindAddr, ":")
-	if len(ipPort) != 2 {
-		return errors.Errorf("invalid bind addr: %v", settings.BindAddr)
+	xdsAddr := settings.GetGloo().GetXdsBindAddr()
+	if xdsAddr == "" {
+		xdsAddr = settings.GetBindAddr()
+		if xdsAddr == "" {
+			xdsAddr = DefaultXdsBindAddr
+		}
 	}
-	port, err := strconv.Atoi(ipPort[1])
+	xdsTcpAddress, err := getAddr(xdsAddr)
 	if err != nil {
-		return errors.Wrapf(err, "invalid bind addr: %v", settings.BindAddr)
+		return errors.Wrapf(err, "parsing xds addr")
 	}
-	refreshRate, err := types.DurationFromProto(settings.RefreshRate)
+
+	validationAddr := settings.GetGloo().GetValidationBindAddr()
+	if validationAddr == "" {
+		validationAddr = DefaultValidationBindAddr
+	}
+	validationTcpAddress, err := getAddr(validationAddr)
 	if err != nil {
-		return err
+		return errors.Wrapf(err, "parsing validation addr")
+	}
+
+	refreshRate := time.Minute
+	if settings.GetRefreshRate() != nil {
+		refreshRate, err = types.DurationFromProto(settings.GetRefreshRate())
+		if err != nil {
+			return err
+		}
 	}
 
 	writeNamespace := settings.DiscoveryNamespace
@@ -129,30 +205,69 @@ func (s *setupSyncer) Setup(ctx context.Context, kubeCache kube.SharedCache, mem
 	}
 	watchNamespaces := utils.ProcessWatchNamespaces(settings.WatchNamespaces, writeNamespace)
 
-	empty := bootstrap.ControlPlane{}
+	emptyControlPlane := bootstrap.ControlPlane{}
+	emptyValidationServer := bootstrap.ValidationServer{}
 
-	if settings.BindAddr != s.previousBindAddr {
-		if s.cancelControlPlane != nil {
-			s.cancelControlPlane()
-			s.cancelControlPlane = nil
+	if xdsAddr != s.previousXdsServer.addr {
+		if s.previousXdsServer.cancel != nil {
+			s.previousXdsServer.cancel()
+			s.previousXdsServer.cancel = nil
 		}
-		s.controlPlane = empty
+		s.controlPlane = emptyControlPlane
 	}
 
-	// enter this block either on the first loop, or if bind addr changed
-	if s.controlPlane == empty {
+	if validationAddr != s.previousValidationServer.addr {
+		if s.previousValidationServer.cancel != nil {
+			s.previousValidationServer.cancel()
+			s.previousValidationServer.cancel = nil
+		}
+		s.validationServer = emptyValidationServer
+	}
+
+	// initialize the control plane context in this block either on the first loop, or if bind addr changed
+	if s.controlPlane == emptyControlPlane {
 		// create new context as the grpc server might survive multiple iterations of this loop.
 		ctx, cancel := context.WithCancel(context.Background())
 		var callbacks xdsserver.Callbacks
 		if s.extensions != nil {
 			callbacks = s.extensions.XdsCallbacks
 		}
-		s.controlPlane = NewControlPlane(ctx, s.grpcServer(ctx), callbacks, true)
-		s.cancelControlPlane = cancel
+		s.controlPlane = NewControlPlane(ctx, s.makeGrpcServer(ctx), xdsTcpAddress, callbacks, true)
+		s.previousXdsServer.cancel = cancel
+		s.previousXdsServer.addr = xdsAddr
+	}
+
+	// initialize the validation server context in this block either on the first loop, or if bind addr changed
+	if s.validationServer == emptyValidationServer {
+		// create new context as the grpc server might survive multiple iterations of this loop.
+		ctx, cancel := context.WithCancel(context.Background())
+		s.validationServer = NewValidationServer(ctx, s.makeGrpcServer(ctx), validationTcpAddress, true)
+		s.previousValidationServer.cancel = cancel
+		s.previousValidationServer.addr = validationAddr
+	}
+
+	consulClient, err := bootstrap.ConsulClientForSettings(settings)
+	if err != nil {
+		return err
+	}
+
+	var vaultClient *vaultapi.Client
+	if vaultSettings := settings.GetVaultSecretSource(); vaultSettings != nil {
+		vaultClient, err = bootstrap.VaultClientForSettings(vaultSettings)
+		if err != nil {
+			return err
+		}
 	}
 
 	var clientset kubernetes.Interface
-	opts, err := BootstrapFactories(ctx, &clientset, kubeCache, memCache, settings)
+	opts, err := constructOpts(ctx,
+		&clientset,
+		kubeCache,
+		consulClient,
+		vaultClient,
+		memCache,
+		settings,
+	)
 	if err != nil {
 		return err
 	}
@@ -162,23 +277,38 @@ func (s *setupSyncer) Setup(ctx context.Context, kubeCache kube.SharedCache, mem
 		Ctx:         ctx,
 		RefreshRate: refreshRate,
 	}
-	opts.BindAddr = &net.TCPAddr{
-		IP:   net.ParseIP(ipPort[0]),
-		Port: port,
-	}
 	opts.ControlPlane = s.controlPlane
+	opts.ValidationServer = s.validationServer
 	// if nil, kube plugin disabled
 	opts.KubeClient = clientset
-	opts.DevMode = true
+	opts.DevMode = settings.DevMode
 	opts.Settings = settings
 
-	return s.runFunc(opts)
+	// if vault service discovery specified, initialize consul watcher
+	if consulServiceDiscovery := settings.GetConsul().GetServiceDiscovery(); consulServiceDiscovery != nil {
+		// Set up Consul client
+		consulClientWrapper, err := consul.NewConsulWatcher(consulClient, consulServiceDiscovery.GetDataCenters())
+		if err != nil {
+			return err
+		}
+		opts.ConsulWatcher = consulClientWrapper
+	}
+
+	err = s.runFunc(opts)
+
+	s.validationServer.StartGrpcServer = opts.ValidationServer.StartGrpcServer
+	s.controlPlane.StartGrpcServer = opts.ControlPlane.StartGrpcServer
+
+	return err
 }
 
 type Extensions struct {
 	PluginExtensions []plugins.Plugin
 	SyncerExtensions []TranslatorSyncerExtensionFactory
 	XdsCallbacks     xdsserver.Callbacks
+
+	// optional custom handler for envoy usage metrics that get pushed to the gloo pod
+	MetricsHandler metricsservice.MetricsHandler
 }
 
 func RunGloo(opts bootstrap.Opts) error {
@@ -202,7 +332,11 @@ func RunGlooWithExtensions(opts bootstrap.Opts, extensions Extensions) error {
 		return err
 	}
 
-	hybridUsClient, err := upstreams.NewHybridUpstreamClient(upstreamClient, opts.Services)
+	kubeServiceClient := opts.KubeServiceClient
+	if opts.Settings.GetGloo().GetDisableKubernetesDestinations() {
+		kubeServiceClient = nil
+	}
+	hybridUsClient, err := upstreams.NewHybridUpstreamClient(upstreamClient, kubeServiceClient, opts.ConsulWatcher)
 	if err != nil {
 		return err
 	}
@@ -238,8 +372,17 @@ func RunGlooWithExtensions(opts bootstrap.Opts, extensions Extensions) error {
 		return err
 	}
 
+	authConfigClient, err := extauth.NewAuthConfigClient(opts.AuthConfigs)
+	if err != nil {
+		return err
+	}
+	if err := authConfigClient.Register(); err != nil {
+		return err
+	}
+
 	// Register grpc endpoints to the grpc server
-	xdsHasher := xds.SetupEnvoyXds(opts.ControlPlane.GrpcServer, opts.ControlPlane.XDSServer, opts.ControlPlane.SnapshotCache)
+	xds.SetupEnvoyXds(opts.ControlPlane.GrpcServer, opts.ControlPlane.XDSServer, opts.ControlPlane.SnapshotCache)
+	xdsHasher := xds.NewNodeHasher()
 
 	allPlugins := registry.Plugins(opts, extensions.PluginExtensions...)
 
@@ -255,6 +398,9 @@ func RunGlooWithExtensions(opts bootstrap.Opts, extensions Extensions) error {
 	var syncerExtensions []TranslatorSyncerExtension
 	params := TranslatorSyncerExtensionParams{
 		SettingExtensions: opts.Settings.Extensions,
+		RateLimitDescriptorSettings: ratelimit.EnvoySettings{
+			Descriptors: opts.Settings.GetRatelimit().GetDescriptors(),
+		},
 	}
 	for _, syncerExtensionFactory := range extensions.SyncerExtensions {
 		syncerExtension, err := syncerExtensionFactory(watchOpts.Ctx, params)
@@ -267,25 +413,56 @@ func RunGlooWithExtensions(opts bootstrap.Opts, extensions Extensions) error {
 
 	errs := make(chan error)
 
-	apiCache := v1.NewApiEmitter(artifactClient, endpointClient, proxyClient, upstreamGroupClient, secretClient, hybridUsClient)
+	disc := discovery.NewEndpointDiscovery(opts.WatchNamespaces, opts.WriteNamespace, endpointClient, discoveryPlugins)
+	edsSync := discovery.NewEdsSyncer(disc, discovery.Opts{}, watchOpts.RefreshRate)
+	discoveryCache := v1.NewEdsEmitter(hybridUsClient)
+	edsEventLoop := v1.NewEdsEventLoop(discoveryCache, edsSync)
+	edsErrs, err := edsEventLoop.Run(opts.WatchNamespaces, watchOpts)
+	if err != nil {
+		return err
+	}
+
+	warmTimeout := opts.Settings.GetGloo().GetEndpointsWarmingTimeout()
+	if warmTimeout != nil {
+		warmTimeoutDuration, err := types.DurationFromProto(warmTimeout)
+		ctx := opts.WatchOpts.Ctx
+		err = channelutils.WaitForReady(ctx, warmTimeoutDuration, edsEventLoop.Ready(), disc.Ready())
+		if err != nil {
+			// make sure that the reason we got here is not context cancellation
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			logger.Panicw("failed warming up endpoints - consider adjusting endpointsWarmingTimeout", "warmTimeoutDuration", warmTimeoutDuration)
+		}
+	}
+
+	// We are ready!
+
+	go errutils.AggregateErrs(watchOpts.Ctx, errs, edsErrs, "eds.gloo")
+
+	apiCache := v1.NewApiEmitter(artifactClient, endpointClient, proxyClient, upstreamGroupClient, secretClient, hybridUsClient, authConfigClient)
 	rpt := reporter.NewReporter("gloo", hybridUsClient.BaseClient(), proxyClient.BaseClient(), upstreamGroupClient.BaseClient())
-	apiSync := NewTranslatorSyncer(translator.NewTranslator(allPlugins, opts.Settings), opts.ControlPlane.SnapshotCache, xdsHasher, rpt, opts.DevMode, syncerExtensions)
-	apiEventLoop := v1.NewApiEventLoop(apiCache, apiSync)
+
+	t := translator.NewTranslator(sslutils.NewSslConfigTranslator(), opts.Settings, allPlugins...)
+
+	validator := validation.NewValidator(t)
+	if opts.ValidationServer.Server != nil {
+		opts.ValidationServer.Server.SetValidator(validator)
+	}
+
+	translationSync := NewTranslatorSyncer(t, opts.ControlPlane.SnapshotCache, xdsHasher, rpt, opts.DevMode, syncerExtensions)
+
+	syncers := v1.ApiSyncers{
+		translationSync,
+		validator,
+	}
+
+	apiEventLoop := v1.NewApiEventLoop(apiCache, syncers)
 	apiEventLoopErrs, err := apiEventLoop.Run(opts.WatchNamespaces, watchOpts)
 	if err != nil {
 		return err
 	}
 	go errutils.AggregateErrs(watchOpts.Ctx, errs, apiEventLoopErrs, "event_loop.gloo")
-
-	disc := discovery.NewEndpointDiscovery(opts.WatchNamespaces, opts.WriteNamespace, endpointClient, discoveryPlugins)
-	edsSync := discovery.NewEdsSyncer(disc, discovery.Opts{}, watchOpts.RefreshRate)
-	discoveryCache := v1.NewDiscoveryEmitter(hybridUsClient, secretClient)
-	edsEventLoop := v1.NewDiscoveryEventLoop(discoveryCache, edsSync)
-	edsErrs, err := edsEventLoop.Run(opts.WatchNamespaces, watchOpts)
-	if err != nil {
-		return err
-	}
-	go errutils.AggregateErrs(watchOpts.Ctx, errs, edsErrs, "eds.gloo")
 
 	go func() {
 		for {
@@ -297,46 +474,104 @@ func RunGlooWithExtensions(opts bootstrap.Opts, extensions Extensions) error {
 		}
 	}()
 
-	if !opts.ControlPlane.StartGrpcServer {
-		return nil
+	if opts.ControlPlane.StartGrpcServer {
+		// copy for the go-routines
+		controlPlane := opts.ControlPlane
+		lis, err := net.Listen(opts.ControlPlane.BindAddr.Network(), opts.ControlPlane.BindAddr.String())
+		if err != nil {
+			return err
+		}
+		go func() {
+			<-controlPlane.GrpcService.Ctx.Done()
+			controlPlane.GrpcServer.Stop()
+		}()
+
+		go func() {
+			if err := controlPlane.GrpcServer.Serve(lis); err != nil {
+				logger.Errorf("xds grpc server failed to start")
+			}
+		}()
+		opts.ControlPlane.StartGrpcServer = false
 	}
 
-	lis, err := net.Listen(opts.BindAddr.Network(), opts.BindAddr.String())
-	if err != nil {
-		return err
+	if opts.ValidationServer.StartGrpcServer {
+		validationServer := opts.ValidationServer
+		lis, err := net.Listen(validationServer.BindAddr.Network(), validationServer.BindAddr.String())
+		if err != nil {
+			return err
+		}
+		validationServer.Server.Register(validationServer.GrpcServer)
+
+		go func() {
+			<-validationServer.Ctx.Done()
+			validationServer.GrpcServer.Stop()
+		}()
+
+		go func() {
+			if err := validationServer.GrpcServer.Serve(lis); err != nil {
+				logger.Errorf("validation grpc server failed to start")
+			}
+		}()
+		opts.ValidationServer.StartGrpcServer = false
 	}
-	go func() {
-		<-opts.WatchOpts.Ctx.Done()
-		opts.ControlPlane.GrpcServer.Stop()
-	}()
 
 	go func() {
-		if err := opts.ControlPlane.GrpcServer.Serve(lis); err != nil {
-			logger.Errorf("grpc server failed to start")
+		var handler metricsservice.MetricsHandler
+
+		if extensions.MetricsHandler == nil {
+			handler, err = metricsservice.NewConfigMapBackedDefaultHandler(opts.WatchOpts.Ctx)
+			if err != nil {
+				contextutils.LoggerFrom(opts.WatchOpts.Ctx).Fatalw("Error starting metrics watcher", zap.Error(err))
+			}
+		} else {
+			handler = extensions.MetricsHandler
+		}
+
+		if err := runner.RunE(opts.WatchOpts.Ctx, handler); err != nil {
+			contextutils.LoggerFrom(opts.WatchOpts.Ctx).Errorw("err in metrics server", zap.Error(err))
 		}
 	}()
+
+	go func() {
+		for {
+			select {
+			case err, ok := <-errs:
+				if !ok {
+					return
+				}
+				logger.Errorw("gloo main event loop", zap.Error(err))
+			case <-opts.WatchOpts.Ctx.Done():
+				// think about closing this channel
+				// close(errs)
+				return
+			}
+		}
+	}()
+
 	return nil
 }
 
-func BootstrapFactories(ctx context.Context, clientset *kubernetes.Interface, kubeCache kube.SharedCache, memCache memory.InMemoryResourceCache, settings *v1.Settings) (bootstrap.Opts, error) {
+func constructOpts(ctx context.Context, clientset *kubernetes.Interface, kubeCache kube.SharedCache, consulClient *consulapi.Client, vaultClient *vaultapi.Client, memCache memory.InMemoryResourceCache, settings *v1.Settings) (bootstrap.Opts, error) {
 
 	var (
 		cfg           *rest.Config
 		kubeCoreCache corecache.KubeCoreCache
 	)
 
-	upstreamFactory, err := bootstrap.ConfigFactoryForSettings(
+	params := bootstrap.NewConfigFactoryParams(
 		settings,
 		memCache,
 		kubeCache,
-		v1.UpstreamCrd,
 		&cfg,
+		consulClient,
 	)
+
+	upstreamFactory, err := bootstrap.ConfigFactoryForSettings(params, v1.UpstreamCrd)
 	if err != nil {
-		return bootstrap.Opts{}, err
+		return bootstrap.Opts{}, errors.Wrapf(err, "creating config source from settings")
 	}
 
-	serviceClient, err := bootstrap.ServiceClientForSettings(
+	kubeServiceClient, err := bootstrap.KubeServiceClientForSettings(
 		ctx,
 		settings,
 		memCache,
@@ -348,13 +583,7 @@ func BootstrapFactories(ctx context.Context, clientset *kubernetes.Interface, ku
 		return bootstrap.Opts{}, err
 	}
 
-	proxyFactory, err := bootstrap.ConfigFactoryForSettings(
-		settings,
-		memCache,
-		kubeCache,
-		v1.ProxyCrd,
-		&cfg,
-	)
+	proxyFactory, err := bootstrap.ConfigFactoryForSettings(params, v1.ProxyCrd)
 	if err != nil {
 		return bootstrap.Opts{}, err
 	}
@@ -366,19 +595,14 @@ func BootstrapFactories(ctx context.Context, clientset *kubernetes.Interface, ku
 		&cfg,
 		clientset,
 		&kubeCoreCache,
+		vaultClient,
 		v1.SecretCrd.Plural,
 	)
 	if err != nil {
 		return bootstrap.Opts{}, err
 	}
 
-	upstreamGroupFactory, err := bootstrap.ConfigFactoryForSettings(
-		settings,
-		memCache,
-		kubeCache,
-		v1.UpstreamGroupCrd,
-		&cfg,
-	)
+	upstreamGroupFactory, err := bootstrap.ConfigFactoryForSettings(params, v1.UpstreamGroupCrd)
 	if err != nil {
 		return bootstrap.Opts{}, err
 	}
@@ -390,17 +614,26 @@ func BootstrapFactories(ctx context.Context, clientset *kubernetes.Interface, ku
 		&cfg,
 		clientset,
 		&kubeCoreCache,
+		consulClient,
 		v1.ArtifactCrd.Plural,
 	)
 	if err != nil {
 		return bootstrap.Opts{}, err
 	}
+
+	authConfigFactory, err := bootstrap.ConfigFactoryForSettings(params, extauth.AuthConfigCrd)
+	if err != nil {
+		return bootstrap.Opts{}, err
+	}
+
 	return bootstrap.Opts{
-		Upstreams:      upstreamFactory,
-		Services:       serviceClient,
-		Proxies:        proxyFactory,
-		UpstreamGroups: upstreamGroupFactory,
-		Secrets:        secretFactory,
-		Artifacts:      artifactFactory,
+		Upstreams:         upstreamFactory,
+		KubeServiceClient: kubeServiceClient,
+		Proxies:           proxyFactory,
+		UpstreamGroups:    upstreamGroupFactory,
+		Secrets:           secretFactory,
+		Artifacts:         artifactFactory,
+		AuthConfigs:       authConfigFactory,
+		KubeCoreCache:     kubeCoreCache,
 	}, nil
 }

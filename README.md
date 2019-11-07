@@ -1,7 +1,7 @@
 
 
 <h1 align="center">
-    <img src="https://gloo.solo.io/img/Gloo-01.png" alt="Gloo" width="200" height="242">
+    <img src="https://docs.solo.io/gloo/latest/img/Gloo-01.png" alt="Gloo" width="200" height="242">
   <br>
   An Envoy-Powered API Gateway
 </h1>
@@ -16,7 +16,7 @@ Gloo is a feature-rich, Kubernetes-native ingress controller, and next-generatio
 &nbsp; [**Twitter**](https://twitter.com/soloio_inc)
 &nbsp; [**Enterprise Trial**](https://www.solo.io/glooe)
 
-<BR><center><img src="https://gloo.solo.io/introduction/gloo_diagram.png" alt="Gloo Architecture" width="906"></center>
+<BR><center><img src="https://docs.solo.io/gloo/latest/introduction/gloo_diagram.png" alt="Gloo Architecture" width="906"></center>
 
 ## Summary
 
@@ -38,7 +38,7 @@ Gloo is a feature-rich, Kubernetes-native ingress controller, and next-generatio
 
 
 ## Next Steps
-- Join us on our slack channel: [https://slack.solo.io/](https://slack.solo.io/)
+- Join us on our Slack channel: [https://slack.solo.io/](https://slack.solo.io/)
 - Follow us on Twitter: [https://twitter.com/soloio_inc](https://twitter.com/soloio_inc)
 - Check out the docs: [https://gloo.solo.io](https://gloo.solo.io)
 - Check out the code and contribute: [Contribution Guide](CONTRIBUTING.md)
@@ -49,3 +49,6 @@ Gloo is a feature-rich, Kubernetes-native ingress controller, and next-generatio
 **Gloo** would not be possible without the valuable open-source work of projects in the community. We would like to extend a special thank-you to [Envoy](https://www.envoyproxy.io).
 
 
+# Security
+
+*Reporting security issues:* We take Gloo's security very seriously. If you've found a security issue or a potential security issue in Gloo, please DO NOT file a public Github issue, instead send your report privately to [security@solo.io](mailto:security@solo.io).

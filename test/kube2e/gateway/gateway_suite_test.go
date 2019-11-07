@@ -1,20 +1,33 @@
 package gateway_test
 
 import (
+	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/avast/retry-go"
-	"github.com/solo-io/gloo/test/kube2e"
-	"github.com/solo-io/go-utils/testutils/clusterlock"
+	"github.com/solo-io/gloo/pkg/cliutil/install"
+
+	"github.com/gogo/protobuf/types"
+	clienthelpers "github.com/solo-io/gloo/projects/gloo/cli/pkg/helpers"
+	"github.com/solo-io/solo-kit/pkg/api/v1/clients"
+
+	"github.com/pkg/errors"
+	"github.com/solo-io/gloo/projects/gloo/cli/pkg/cmd/check"
+	"github.com/solo-io/gloo/projects/gloo/cli/pkg/cmd/options"
+	"github.com/solo-io/solo-kit/pkg/api/v1/resources/core"
+
+	"github.com/solo-io/gloo/test/helpers"
+
+	"github.com/solo-io/go-utils/log"
+	"github.com/solo-io/go-utils/testutils/helper"
 
 	"github.com/solo-io/go-utils/testutils"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/solo-io/go-utils/testutils/helper"
 	skhelpers "github.com/solo-io/solo-kit/test/helpers"
 )
 
@@ -22,47 +35,113 @@ func TestGateway(t *testing.T) {
 	if testutils.AreTestsDisabled() {
 		return
 	}
+
+	if os.Getenv("CLUSTER_LOCK_TESTS") == "1" {
+		log.Warnf("This test does not require using a cluster lock. Cluster lock is enabled so this test is disabled. " +
+			"To enable, unset CLUSTER_LOCK_TESTS in your env.")
+		return
+	}
+	helpers.RegisterGlooDebugLogPrintHandlerAndClearLogs()
 	skhelpers.RegisterCommonFailHandlers()
 	skhelpers.SetupLog()
 	RunSpecs(t, "Gateway Suite")
 }
 
 var testHelper *helper.SoloTestHelper
-var locker *clusterlock.TestClusterLocker
 
-var _ = BeforeSuite(func() {
+var _ = BeforeSuite(StartTestHelper)
+var _ = AfterSuite(TearDownTestHelper)
+
+func StartTestHelper() {
 	cwd, err := os.Getwd()
 	Expect(err).NotTo(HaveOccurred())
 
+	randomNumber := time.Now().Unix() % 10000
 	testHelper, err = helper.NewSoloTestHelper(func(defaults helper.TestConfig) helper.TestConfig {
 		defaults.RootDir = filepath.Join(cwd, "../../..")
 		defaults.HelmChartName = "gloo"
+		defaults.InstallNamespace = "gateway-test-" + fmt.Sprintf("%d-%d", randomNumber, GinkgoParallelNode())
+		defaults.Verbose = true
 		return defaults
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	options := clusterlock.Options{
-		IdPrefix: os.ExpandEnv("gateway-${BUILD_ID}-"),
-	}
-	locker, err = clusterlock.NewTestClusterLocker(kube2e.MustKubeClient(), options)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(locker.AcquireLock(retry.Attempts(40))).NotTo(HaveOccurred())
+	// Register additional fail handlers
+	skhelpers.RegisterPreFailHandler(helpers.KubeDumpOnFail(GinkgoWriter, "knative-serving", testHelper.InstallNamespace))
+	RegisterFailHandler(func(_ string, _ ...int) {
+		glooLogs, _ := install.KubectlOut(nil, "logs", "-n", testHelper.InstallNamespace, "-l", "gloo=gloo")
+		gwLogs, _ := install.KubectlOut(nil, "logs", "-n", testHelper.InstallNamespace, "-l", "gloo=gateway")
 
-	// Install Gloo
-	err = testHelper.InstallGloo(helper.GATEWAY, 5*time.Minute)
-	Expect(err).NotTo(HaveOccurred())
-})
+		_, _ = fmt.Fprintf(GinkgoWriter, "\n\nGLOO LOGS\n\n%s\n\n", glooLogs)
+		_, _ = fmt.Fprintf(GinkgoWriter, "\n\nGATEWAY LOGS\n\n%s\n\n", gwLogs)
+	})
 
-var _ = AfterSuite(func() {
-	defer locker.ReleaseLock()
+	valueOverrideFile, cleanupFunc := getHelmValuesOverrideFile()
+	defer cleanupFunc()
 
-	err := testHelper.UninstallGloo()
+	err = testHelper.InstallGloo(helper.GATEWAY, 5*time.Minute, helper.ExtraArgs("--values", valueOverrideFile))
 	Expect(err).NotTo(HaveOccurred())
 
-	// TODO go-utils should expose `glooctl uninstall --delete-namespace`
-	_ = testutils.Kubectl("delete", "namespace", testHelper.InstallNamespace)
-
+	// Check that everything is OK
 	Eventually(func() error {
-		return testutils.Kubectl("get", "namespace", testHelper.InstallNamespace)
-	}, "60s", "1s").Should(HaveOccurred())
-})
+		opts := &options.Options{
+			Metadata: core.Metadata{
+				Namespace: testHelper.InstallNamespace,
+			},
+		}
+		ok, err := check.CheckResources(opts)
+		if err != nil {
+			return errors.Wrap(err, "unable to run glooctl check")
+		}
+		if ok {
+			return nil
+		}
+		return errors.New("glooctl check detected a problem with the installation")
+	}, "40s", "5s").Should(BeNil())
+
+	// TODO(marco): explicitly enable strict validation, this can be removed once we enable validation by default
+	// See https://github.com/solo-io/gloo/issues/1374
+	enableStrictValidation()
+}
+
+func TearDownTestHelper() {
+	if testHelper != nil {
+		err := testHelper.UninstallGloo()
+		Expect(err).NotTo(HaveOccurred())
+		_ = testutils.Kubectl("delete", "--wait=false", "namespace", testHelper.InstallNamespace)
+	}
+}
+
+func getHelmValuesOverrideFile() (filename string, cleanup func()) {
+	values, err := ioutil.TempFile("", "*.yaml")
+	Expect(err).NotTo(HaveOccurred())
+
+	_, err = values.Write([]byte(`
+global:
+  glooRbac:
+    namespaced: true
+    nameSuffix: e2e-test-rbac-suffix
+settings:
+  singleNamespace: true
+  create: true
+`))
+	Expect(err).NotTo(HaveOccurred())
+
+	err = values.Close()
+	Expect(err).NotTo(HaveOccurred())
+
+	return values.Name(), func() { _ = os.Remove(values.Name()) }
+}
+
+func enableStrictValidation() {
+	settingsClient := clienthelpers.MustSettingsClient()
+	settings, err := settingsClient.Read(testHelper.InstallNamespace, "default", clients.ReadOpts{})
+	Expect(err).NotTo(HaveOccurred())
+
+	Expect(settings.Gateway).NotTo(BeNil())
+	Expect(settings.Gateway.Validation).NotTo(BeNil())
+	settings.Gateway.Validation.AlwaysAccept = &types.BoolValue{Value: false}
+
+	_, err = settingsClient.Write(settings, clients.WriteOpts{OverwriteExisting: true})
+	Expect(err).NotTo(HaveOccurred())
+}

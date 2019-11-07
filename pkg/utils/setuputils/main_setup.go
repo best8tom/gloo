@@ -3,13 +3,21 @@ package setuputils
 import (
 	"context"
 	"flag"
+	"fmt"
 	"sync"
 	"time"
 
-	"github.com/gogo/protobuf/types"
+	"github.com/solo-io/gloo/pkg/utils/usage"
 	"github.com/solo-io/gloo/pkg/version"
+	"github.com/solo-io/reporting-client/pkg/client"
+
+	"go.uber.org/zap"
+
+	"github.com/solo-io/gloo/projects/gloo/pkg/defaults"
+
+	"github.com/gogo/protobuf/types"
+	"github.com/solo-io/gloo/pkg/utils/settingsutil"
 	v1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1"
-	check "github.com/solo-io/go-checkpoint"
 	"github.com/solo-io/go-utils/contextutils"
 	"github.com/solo-io/go-utils/kubeutils"
 	"github.com/solo-io/solo-kit/pkg/api/v1/clients"
@@ -24,22 +32,40 @@ type SetupOpts struct {
 	LoggingPrefix string
 	SetupFunc     SetupFunc
 	ExitOnError   bool
+	CustomCtx     context.Context
+
+	// optional- if present, report usage with the payload this discovers
+	// should really only provide it in very intentional places- in the gloo pod, and in glooctl
+	// otherwise, we'll provide redundant copies of the usage data
+	UsageReporter client.UsagePayloadReader
 }
 
 var once sync.Once
 
 func Main(opts SetupOpts) error {
-	start := time.Now()
 	loggingPrefix := opts.LoggingPrefix
-	check.CallCheck(loggingPrefix, version.Version, start)
+
 	// prevent panic if multiple flag.Parse called concurrently
 	once.Do(func() {
 		flag.Parse()
 	})
 
-	ctx := contextutils.WithLogger(context.Background(), loggingPrefix)
+	ctx := opts.CustomCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = contextutils.WithLogger(ctx, loggingPrefix)
 
-	settingsClient, err := KubeOrFileSettingsClient(ctx, setupDir)
+	if opts.UsageReporter != nil {
+		go func() {
+			errs := StartReportingUsage(opts.CustomCtx, opts.UsageReporter, opts.LoggingPrefix)
+			for err := range errs {
+				contextutils.LoggerFrom(ctx).Errorw("Error while reporting usage", zap.Error(err))
+			}
+		}()
+	}
+
+	settingsClient, err := kubeOrFileSettingsClient(ctx, setupNamespace, setupDir)
 	if err != nil {
 		return err
 	}
@@ -70,24 +96,28 @@ func Main(opts SetupOpts) error {
 	return nil
 }
 
-// TODO (ilackarms): instead of using an heuristic here, read from a CLI flagg
-// first attempt to use kube crd, otherwise fall back to file
-func KubeOrFileSettingsClient(ctx context.Context, settingsDir string) (v1.SettingsClient, error) {
-	cfg, err := kubeutils.GetConfig("", "")
-	if err == nil {
-		return v1.NewSettingsClient(&factory.KubeResourceClientFactory{
-			Crd:         v1.SettingsCrd,
-			Cfg:         cfg,
-			SharedCache: kube.NewKubeCache(ctx),
+func kubeOrFileSettingsClient(ctx context.Context, setupNamespace, settingsDir string) (v1.SettingsClient, error) {
+	if settingsDir != "" {
+		contextutils.LoggerFrom(ctx).Infow("using filesystem for settings", zap.String("directory", settingsDir))
+		return v1.NewSettingsClient(&factory.FileResourceClientFactory{
+			RootDir: settingsDir,
 		})
 	}
-	return v1.NewSettingsClient(&factory.FileResourceClientFactory{
-		RootDir: settingsDir,
+	cfg, err := kubeutils.GetConfig("", "")
+	if err != nil {
+		return nil, err
+	}
+	return v1.NewSettingsClient(&factory.KubeResourceClientFactory{
+		Crd:                v1.SettingsCrd,
+		Cfg:                cfg,
+		SharedCache:        kube.NewKubeCache(ctx),
+		NamespaceWhitelist: []string{setupNamespace},
+		SkipCrdCreation:    settingsutil.GetSkipCrdCreation(),
 	})
 }
 
 // TODO(ilackarms): remove this or move it to a test package, only use settings watch for production gloo
-func writeDefaultSettings(settingsNamespace, name string, cli v1.SettingsClient) error {
+func writeDefaultSettings(defaultNamespace, name string, cli v1.SettingsClient) error {
 	settings := &v1.Settings{
 		ConfigSource: &v1.Settings_KubernetesConfigSource{
 			KubernetesConfigSource: &v1.Settings_KubernetesCrds{},
@@ -98,14 +128,21 @@ func writeDefaultSettings(settingsNamespace, name string, cli v1.SettingsClient)
 		SecretSource: &v1.Settings_KubernetesSecretSource{
 			KubernetesSecretSource: &v1.Settings_KubernetesSecrets{},
 		},
-		BindAddr:           "0.0.0.0:9977",
+		Gloo: &v1.GlooOptions{
+			XdsBindAddr: fmt.Sprintf("0.0.0.0:%v", defaults.GlooXdsPort),
+		},
 		RefreshRate:        types.DurationProto(time.Minute),
 		DevMode:            true,
-		DiscoveryNamespace: settingsNamespace,
-		Metadata:           core.Metadata{Namespace: settingsNamespace, Name: name},
+		DiscoveryNamespace: defaultNamespace,
+		Metadata:           core.Metadata{Namespace: defaultNamespace, Name: name},
 	}
 	if _, err := cli.Write(settings, clients.WriteOpts{}); err != nil && !errors.IsExist(err) {
 		return errors.Wrapf(err, "failed to create default settings")
 	}
 	return nil
+}
+
+func StartReportingUsage(ctx context.Context, usagePayloadReader client.UsagePayloadReader, product string) <-chan error {
+	usageClient := client.NewUsageClient(usage.ReportingServiceUrl, usagePayloadReader, usage.LoadInstanceMetadata(product, version.Version))
+	return usageClient.StartReportingUsage(ctx, usage.ReportingPeriod)
 }

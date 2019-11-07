@@ -1,11 +1,12 @@
 package add
 
 import (
-	"fmt"
 	"sort"
 
-	"github.com/solo-io/gloo/projects/gloo/cli/pkg/common"
+	"github.com/solo-io/gloo/pkg/utils/selectionutils"
+	"github.com/solo-io/gloo/projects/gloo/cli/pkg/printers"
 	"github.com/solo-io/go-utils/cliutils"
+	"github.com/solo-io/solo-kit/pkg/api/v1/resources/core"
 
 	gatewayv1 "github.com/solo-io/gloo/projects/gateway/pkg/api/v1"
 	"github.com/solo-io/gloo/projects/gloo/cli/pkg/helpers"
@@ -56,53 +57,8 @@ func Route(opts *options.Options, optionsFunc ...cliutils.OptionsFunc) *cobra.Co
 	return cmd
 }
 
-func selectOrCreateVirtualService(opts *options.Options) (*gatewayv1.VirtualService, error) {
-	vsClient := helpers.MustVirtualServiceClient()
-	if opts.Metadata.Name != "" {
-		if existing, err := vsClient.Read(opts.Metadata.Namespace, opts.Metadata.Name,
-			clients.ReadOpts{Ctx: opts.Top.Ctx}); err == nil {
-			return existing, nil
-		}
-	}
-
-	for _, ns := range helpers.MustGetNamespaces() {
-		vss, err := vsClient.List(ns, clients.ListOpts{Ctx: opts.Top.Ctx})
-		if err != nil {
-			return nil, err
-		}
-
-		for _, vs := range vss {
-			for _, domain := range vs.VirtualHost.Domains {
-				if domain == "*" {
-					fmt.Printf("selected virtualservice %v for route\n", vs.Metadata.Name)
-					return vs, nil
-				}
-			}
-		}
-	}
-
-	if opts.Metadata.Name == "" {
-		opts.Metadata.Name = "default"
-	}
-	if opts.Metadata.Namespace == "" {
-		opts.Metadata.Namespace = defaults.GlooSystem
-	}
-
-	fmt.Printf("creating virtualservice %v with default domain *\n", opts.Metadata.Name)
-	return &gatewayv1.VirtualService{
-		Metadata: opts.Metadata,
-		VirtualHost: &v1.VirtualHost{
-			Domains: []string{"*"},
-		},
-	}, nil
-}
-
 func addRoute(opts *options.Options) error {
 	match, err := matcherFromInput(opts.Add.Route.Matcher)
-	if err != nil {
-		return err
-	}
-	action, err := actionFromInput(opts.Add.Route)
 	if err != nil {
 		return err
 	}
@@ -111,36 +67,78 @@ func addRoute(opts *options.Options) error {
 		return err
 	}
 
-	v1Route := &v1.Route{
+	v1Route := &gatewayv1.Route{
 		Matcher:      match,
-		Action:       action,
 		RoutePlugins: plugins,
 	}
 
-	index := int(opts.Add.Route.InsertIndex)
+	if opts.Add.Route.Destination.Delegate.Name != "" {
+		v1Route.Action = &gatewayv1.Route_DelegateAction{
+			DelegateAction: &opts.Add.Route.Destination.Delegate,
+		}
+	} else {
+		v1Route.Action, err = routeActionFromInput(opts.Add.Route)
+		if err != nil {
+			return err
+		}
+	}
 
-	virtualService, err := selectOrCreateVirtualService(opts)
+	if opts.Add.Route.AddToRouteTable {
+		rtRef := &core.ResourceRef{
+			Namespace: opts.Metadata.Namespace,
+			Name:      opts.Metadata.Name,
+		}
+		selector := selectionutils.NewRouteTableSelector(helpers.MustRouteTableClient(), helpers.NewNamespaceLister(), defaults.GlooSystem)
+		routeTable, err := selector.SelectOrCreateRouteTable(opts.Top.Ctx, rtRef)
+		if err != nil {
+			return err
+		}
+
+		index := int(opts.Add.Route.InsertIndex)
+		routeTable.Routes = append(routeTable.Routes, nil)
+		copy(routeTable.Routes[index+1:], routeTable.Routes[index:])
+		routeTable.Routes[index] = v1Route
+
+		if !opts.Add.DryRun {
+			routeTable, err = helpers.MustRouteTableClient().Write(routeTable, clients.WriteOpts{
+				Ctx:               opts.Top.Ctx,
+				OverwriteExisting: true,
+			})
+			if err != nil {
+				return err
+			}
+		}
+
+		_ = printers.PrintRouteTables(gatewayv1.RouteTableList{routeTable}, opts.Top.Output)
+		return nil
+	}
+
+	vsRef := &core.ResourceRef{
+		Namespace: opts.Metadata.Namespace,
+		Name:      opts.Metadata.Name,
+	}
+	selector := selectionutils.NewVirtualServiceSelector(helpers.MustVirtualServiceClient(), helpers.NewNamespaceLister(), defaults.GlooSystem)
+	virtualService, err := selector.SelectOrCreateVirtualService(opts.Top.Ctx, vsRef)
 	if err != nil {
 		return err
 	}
 
+	index := int(opts.Add.Route.InsertIndex)
 	virtualService.VirtualHost.Routes = append(virtualService.VirtualHost.Routes, nil)
 	copy(virtualService.VirtualHost.Routes[index+1:], virtualService.VirtualHost.Routes[index:])
 	virtualService.VirtualHost.Routes[index] = v1Route
 
-	if opts.Add.DryRun {
-		return common.PrintKubeCrd(virtualService, gatewayv1.VirtualServiceCrd)
+	if !opts.Add.DryRun {
+		virtualService, err = helpers.MustVirtualServiceClient().Write(virtualService, clients.WriteOpts{
+			Ctx:               opts.Top.Ctx,
+			OverwriteExisting: true,
+		})
+		if err != nil {
+			return err
+		}
 	}
 
-	out, err := helpers.MustVirtualServiceClient().Write(virtualService, clients.WriteOpts{
-		Ctx:               opts.Top.Ctx,
-		OverwriteExisting: true,
-	})
-	if err != nil {
-		return err
-	}
-
-	helpers.PrintVirtualServices(gatewayv1.VirtualServiceList{out}, opts.Top.Output)
+	_ = printers.PrintVirtualServices(gatewayv1.VirtualServiceList{virtualService}, opts.Top.Output)
 	return nil
 }
 
@@ -171,6 +169,16 @@ func matcherFromInput(input options.RouteMatchers) (*v1.Matcher, error) {
 	default:
 		return nil, errors.Errorf("must provide path prefix, path exact, or path regex for route matcher")
 	}
+	for k, v := range input.QueryParameterMatcher.MustMap() {
+		m.QueryParameters = append(m.QueryParameters, &v1.QueryParameterMatcher{
+			Name:  k,
+			Value: v,
+			Regex: true,
+		})
+	}
+	sort.SliceStable(m.QueryParameters, func(i, j int) bool {
+		return m.QueryParameters[i].Name < m.QueryParameters[j].Name
+	})
 	if len(input.Methods) > 0 {
 		m.Methods = input.Methods
 	}
@@ -187,8 +195,8 @@ func matcherFromInput(input options.RouteMatchers) (*v1.Matcher, error) {
 	return m, nil
 }
 
-func actionFromInput(input options.InputRoute) (*v1.Route_RouteAction, error) {
-	a := &v1.Route_RouteAction{
+func routeActionFromInput(input options.InputRoute) (*gatewayv1.Route_RouteAction, error) {
+	a := &gatewayv1.Route_RouteAction{
 		RouteAction: &v1.RouteAction{},
 	}
 
@@ -237,7 +245,7 @@ func pluginsFromInput(input options.RoutePlugins) (*v1.RoutePlugins, error) {
 
 func destSpecFromInput(input options.DestinationSpec) (*v1.DestinationSpec, error) {
 	switch {
-	case input.Aws.LogicalName != "":
+	case input.Aws.LogicalName != "" && input.Aws.LogicalName != surveyutils.NoneOfTheAbove:
 		return &v1.DestinationSpec{
 			DestinationType: &v1.DestinationSpec_Aws{
 				Aws: &aws.DestinationSpec{
@@ -246,7 +254,7 @@ func destSpecFromInput(input options.DestinationSpec) (*v1.DestinationSpec, erro
 				},
 			},
 		}, nil
-	case input.Rest.FunctionName != "":
+	case input.Rest.FunctionName != "" && input.Rest.FunctionName != surveyutils.NoneOfTheAbove:
 		return &v1.DestinationSpec{
 			DestinationType: &v1.DestinationSpec_Rest{
 				Rest: &rest.DestinationSpec{
@@ -258,5 +266,5 @@ func destSpecFromInput(input options.DestinationSpec) (*v1.DestinationSpec, erro
 			},
 		}, nil
 	}
-	return nil, nil // errors.Errorf("unimplemented destination type: %v", input.DestinationType)
+	return nil, nil
 }

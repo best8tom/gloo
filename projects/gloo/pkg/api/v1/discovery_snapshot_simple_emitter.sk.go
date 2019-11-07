@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	github_com_solo_io_solo_kit_pkg_api_v1_resources_common_kubernetes "github.com/solo-io/solo-kit/pkg/api/v1/resources/common/kubernetes"
+
 	"go.opencensus.io/stats"
 
 	"github.com/solo-io/go-utils/errutils"
@@ -45,16 +47,18 @@ func (c *discoverySimpleEmitter) Snapshots(ctx context.Context) (<-chan *Discove
 	go errutils.AggregateErrs(ctx, errs, watchErrs, "discovery-emitter")
 
 	go func() {
-		originalSnapshot := DiscoverySnapshot{}
-		currentSnapshot := originalSnapshot.Clone()
+		currentSnapshot := DiscoverySnapshot{}
 		timer := time.NewTicker(time.Second * 1)
+		var previousHash uint64
 		sync := func() {
-			if originalSnapshot.Hash() == currentSnapshot.Hash() {
+			currentHash := currentSnapshot.Hash()
+			if previousHash == currentHash {
 				return
 			}
 
+			previousHash = currentHash
+
 			stats.Record(ctx, mDiscoverySnapshotOut.M(1))
-			originalSnapshot = currentSnapshot.Clone()
 			sentSnapshot := currentSnapshot.Clone()
 			snapshots <- &sentSnapshot
 		}
@@ -83,6 +87,8 @@ func (c *discoverySimpleEmitter) Snapshots(ctx context.Context) (<-chan *Discove
 					switch typed := res.(type) {
 					case *Upstream:
 						currentSnapshot.Upstreams = append(currentSnapshot.Upstreams, typed)
+					case *github_com_solo_io_solo_kit_pkg_api_v1_resources_common_kubernetes.KubeNamespace:
+						currentSnapshot.Kubenamespaces = append(currentSnapshot.Kubenamespaces, typed)
 					case *Secret:
 						currentSnapshot.Secrets = append(currentSnapshot.Secrets, typed)
 					default:

@@ -3,6 +3,7 @@
 package v1
 
 import (
+	"log"
 	"sort"
 
 	"github.com/solo-io/go-utils/hashutils"
@@ -30,12 +31,19 @@ func (r *Endpoint) SetMetadata(meta core.Metadata) {
 func (r *Endpoint) Hash() uint64 {
 	metaCopy := r.GetMetadata()
 	metaCopy.ResourceVersion = ""
+	metaCopy.Generation = 0
+	// investigate zeroing out owner refs as well
+	metaCopy.Annotations = nil
 	return hashutils.HashAll(
 		metaCopy,
 		r.Upstreams,
 		r.Address,
 		r.Port,
 	)
+}
+
+func (r *Endpoint) GroupVersionKind() schema.GroupVersionKind {
+	return EndpointGVK
 }
 
 type EndpointList []*Endpoint
@@ -111,8 +119,6 @@ func (list EndpointList) AsInterfaces() []interface{} {
 	return asInterfaces
 }
 
-var _ resources.Resource = &Endpoint{}
-
 // Kubernetes Adapter for Endpoint
 
 func (o *Endpoint) GetObjectKind() schema.ObjectKind {
@@ -124,11 +130,32 @@ func (o *Endpoint) DeepCopyObject() runtime.Object {
 	return resources.Clone(o).(*Endpoint)
 }
 
-var EndpointCrd = crd.NewCrd("gloo.solo.io",
-	"endpoints",
-	"gloo.solo.io",
-	"v1",
-	"Endpoint",
-	"ep",
-	false,
-	&Endpoint{})
+func (o *Endpoint) DeepCopyInto(out *Endpoint) {
+	clone := resources.Clone(o).(*Endpoint)
+	*out = *clone
+}
+
+var (
+	EndpointCrd = crd.NewCrd(
+		"endpoints",
+		EndpointGVK.Group,
+		EndpointGVK.Version,
+		EndpointGVK.Kind,
+		"ep",
+		false,
+		&Endpoint{})
+)
+
+func init() {
+	if err := crd.AddCrd(EndpointCrd); err != nil {
+		log.Fatalf("could not add crd to global registry")
+	}
+}
+
+var (
+	EndpointGVK = schema.GroupVersionKind{
+		Version: "v1",
+		Group:   "gloo.solo.io",
+		Kind:    "Endpoint",
+	}
+)

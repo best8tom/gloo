@@ -4,11 +4,13 @@ import (
 	"context"
 
 	v1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1"
+	"github.com/solo-io/go-utils/protoutils"
 	"github.com/solo-io/solo-kit/pkg/api/v1/clients/kubesecret"
 	"github.com/solo-io/solo-kit/pkg/api/v1/resources"
+	skcore "github.com/solo-io/solo-kit/pkg/api/v1/resources/core"
 	"github.com/solo-io/solo-kit/pkg/utils/kubeutils"
-
 	kubev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -16,13 +18,51 @@ const (
 	annotationValue = "kube-tls"
 )
 
+type SecretConverterChain struct {
+	converters []kubesecret.SecretConverter
+}
+
+var _ kubesecret.SecretConverter = &SecretConverterChain{}
+
+func NewSecretConverterChain(converters ...kubesecret.SecretConverter) *SecretConverterChain {
+	return &SecretConverterChain{converters: converters}
+}
+
+func (t *SecretConverterChain) FromKubeSecret(ctx context.Context, rc *kubesecret.ResourceClient, secret *kubev1.Secret) (resources.Resource, error) {
+	for _, converter := range t.converters {
+		resource, err := converter.FromKubeSecret(ctx, rc, secret)
+		if err != nil {
+			return nil, err
+		}
+		if resource != nil {
+			return resource, nil
+		}
+	}
+	// any unmatched secrets will be handled by subsequent converters
+	return nil, nil
+}
+
+func (t *SecretConverterChain) ToKubeSecret(ctx context.Context, rc *kubesecret.ResourceClient, resource resources.Resource) (*kubev1.Secret, error) {
+	for _, converter := range t.converters {
+		kubeSecret, err := converter.ToKubeSecret(ctx, rc, resource)
+		if err != nil {
+			return nil, err
+		}
+		if kubeSecret != nil {
+			return kubeSecret, nil
+		}
+	}
+	// any unmatched secrets will be handled by subsequent converters
+	return nil, nil
+}
+
 type TLSSecretConverter struct{}
 
-func (t *TLSSecretConverter) FromKubeSecret(ctx context.Context, rc *kubesecret.ResourceClient, secret *kubev1.Secret) (resources.Resource, error) {
+var _ kubesecret.SecretConverter = &TLSSecretConverter{}
 
+func (t *TLSSecretConverter) FromKubeSecret(ctx context.Context, rc *kubesecret.ResourceClient, secret *kubev1.Secret) (resources.Resource, error) {
 	if secret.Type == kubev1.SecretTypeTLS {
 		glooSecret := &v1.Secret{
-
 			Kind: &v1.Secret_Tls{
 				Tls: &v1.TlsSecret{
 					PrivateKey: string(secret.Data[kubev1.TLSPrivateKeyKey]),
@@ -37,18 +77,11 @@ func (t *TLSSecretConverter) FromKubeSecret(ctx context.Context, rc *kubesecret.
 		glooSecret.Metadata.Annotations[annotationKey] = annotationValue
 		return glooSecret, nil
 	}
-
-	// this is temporary until https://github.com/solo-io/solo-kit/pull/110 is merged
-	// then we can just return nil all the time
-	if rc == nil {
-		return nil, nil
-	}
-
-	return rc.FromKubeSecret(secret)
+	// any unmatched secrets will be handled by subsequent converters
+	return nil, nil
 }
 
-func (t *TLSSecretConverter) ToKubeSecret(ctx context.Context, rc *kubesecret.ResourceClient, resource resources.Resource) (*kubev1.Secret, error) {
-
+func (t *TLSSecretConverter) ToKubeSecret(_ context.Context, _ *kubesecret.ResourceClient, resource resources.Resource) (*kubev1.Secret, error) {
 	if glooSecret, ok := resource.(*v1.Secret); ok {
 		if tlsGlooSecret, ok := glooSecret.Kind.(*v1.Secret_Tls); ok {
 			if glooSecret.Metadata.Annotations != nil {
@@ -71,13 +104,76 @@ func (t *TLSSecretConverter) ToKubeSecret(ctx context.Context, rc *kubesecret.Re
 			}
 		}
 	}
+	// any unmatched secrets will be handled by subsequent converters
+	return nil, nil
+}
 
-	// this is temporary until https://github.com/solo-io/solo-kit/pull/110 is merged
-	// then we can just return nil all the time
-	if rc == nil {
+// The purpose of this implementation of the SecretConverter interface is to provide a way for the user to specify AWS
+// secrets without having to use an annotation to identify the secret as a AWS secret. Instead of an annotation, this
+// converter looks for the two required fields.
+type AwsSecretConverter struct{}
+
+var _ kubesecret.SecretConverter = &AwsSecretConverter{}
+
+const (
+	AwsAccessKeyName = "aws_access_key_id"
+	AwsSecretKeyName = "aws_secret_access_key"
+)
+
+func (t *AwsSecretConverter) FromKubeSecret(ctx context.Context, rc *kubesecret.ResourceClient, secret *kubev1.Secret) (resources.Resource, error) {
+	accessKey, hasAccessKey := secret.Data[AwsAccessKeyName]
+	secretKey, hasSecretKey := secret.Data[AwsSecretKeyName]
+	if hasAccessKey && hasSecretKey {
+		return &v1.Secret{
+			Metadata: skcore.Metadata{
+				Name:        secret.Name,
+				Namespace:   secret.Namespace,
+				Cluster:     secret.ClusterName,
+				Labels:      secret.Labels,
+				Annotations: secret.Annotations,
+			},
+			Kind: &v1.Secret_Aws{
+				Aws: &v1.AwsSecret{
+					AccessKey: string(accessKey),
+					SecretKey: string(secretKey),
+				},
+			},
+		}, nil
+	}
+	// any unmatched secrets will be handled by subsequent converters
+	return nil, nil
+}
+
+func (t *AwsSecretConverter) ToKubeSecret(ctx context.Context, rc *kubesecret.ResourceClient, resource resources.Resource) (*kubev1.Secret, error) {
+	glooSecret, ok := resource.(*v1.Secret)
+	if !ok {
 		return nil, nil
 	}
+	awsGlooSecret, ok := glooSecret.Kind.(*v1.Secret_Aws)
+	if !ok {
+		return nil, nil
+	}
+	objectMeta := kubeutils.ToKubeMeta(glooSecret.Metadata)
+	delete(objectMeta.Annotations, annotationKey)
+	if len(objectMeta.Annotations) == 0 {
+		objectMeta.Annotations = nil
+	}
+	awsBytes, err := protoutils.MarshalBytes(awsGlooSecret.Aws)
+	if err != nil {
+		return nil, err
+	}
+	awsBytes, err = yaml.JSONToYAML(awsBytes)
+	if err != nil {
+		return nil, err
+	}
 
-	return rc.ToKubeSecret(ctx, resource)
-
+	kubeSecret := &kubev1.Secret{
+		ObjectMeta: objectMeta,
+		Type:       kubev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			AwsAccessKeyName: []byte(awsGlooSecret.Aws.AccessKey),
+			AwsSecretKeyName: []byte(awsGlooSecret.Aws.SecretKey),
+		},
+	}
+	return kubeSecret, nil
 }

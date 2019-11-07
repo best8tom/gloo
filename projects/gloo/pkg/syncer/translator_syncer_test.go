@@ -1,27 +1,28 @@
 package syncer_test
 
 import (
+	"github.com/solo-io/gloo/projects/gateway/pkg/defaults"
+	"github.com/solo-io/gloo/projects/gloo/pkg/api/grpc/validation"
 	"github.com/solo-io/gloo/projects/gloo/pkg/plugins"
 	"github.com/solo-io/gloo/projects/gloo/pkg/xds"
 
 	"context"
 
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 	v1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1"
 	. "github.com/solo-io/gloo/projects/gloo/pkg/syncer"
 	"github.com/solo-io/solo-kit/pkg/api/v1/clients"
 	"github.com/solo-io/solo-kit/pkg/api/v1/clients/factory"
 	"github.com/solo-io/solo-kit/pkg/api/v1/clients/memory"
 	envoycache "github.com/solo-io/solo-kit/pkg/api/v1/control-plane/cache"
-	"github.com/solo-io/solo-kit/pkg/api/v1/reporter"
 	"github.com/solo-io/solo-kit/pkg/api/v1/resources/core"
+	"github.com/solo-io/solo-kit/pkg/api/v2/reporter"
 	"github.com/solo-io/solo-kit/pkg/errors"
-	"github.com/solo-io/solo-kit/test/helpers"
-
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("GraphQLSyncer", func() {
+var _ = Describe("Translate Proxy", func() {
+
 	It("writes the reports the translator spits out and calls SetSnapshot on the cache", func() {
 		ref := "syncer-test"
 		resourceClientFactory := &factory.MemoryResourceClientFactory{
@@ -34,7 +35,10 @@ var _ = Describe("GraphQLSyncer", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		proxy := &v1.Proxy{
-			Metadata: helpers.NewRandomMetadata(),
+			Metadata: core.Metadata{
+				Namespace: "gloo-system",
+				Name:      defaults.GatewayProxyName,
+			},
 		}
 
 		c := &mockXdsCache{}
@@ -56,11 +60,12 @@ var _ = Describe("GraphQLSyncer", func() {
 		Expect(proxies[0]).To(BeAssignableToTypeOf(&v1.Proxy{}))
 		Expect(proxies[0].(*v1.Proxy).Status).To(Equal(core.Status{
 			State:      2,
-			Reason:     "hi, how ya doin'?",
+			Reason:     "1 error occurred:\n\t* hi, how ya doin'?\n\n",
 			ReportedBy: ref,
 		}))
 
-		Expect(c.called).To(BeFalse())
+		// NilSnapshot is always consistent, so snapshot will always be set as part of endpoints update
+		Expect(c.called).To(BeTrue())
 
 		// update rv for proxy
 		p1, err := proxyClient.Read(proxy.Metadata.Namespace, proxy.Metadata.Name, clients.ReadOpts{})
@@ -88,12 +93,16 @@ type mockTranslator struct {
 	reportErrs bool
 }
 
-func (t *mockTranslator) Translate(params plugins.Params, proxy *v1.Proxy) (envoycache.Snapshot, reporter.ResourceErrors, error) {
+func (t *mockTranslator) Translate(params plugins.Params, proxy *v1.Proxy) (envoycache.Snapshot, reporter.ResourceReports, *validation.ProxyReport, error) {
 	if t.reportErrs {
-		return envoycache.NilSnapshot{}, reporter.ResourceErrors{proxy: errors.Errorf("hi, how ya doin'?")}, nil
+		rpts := reporter.ResourceReports{}
+		rpts.AddError(proxy, errors.Errorf("hi, how ya doin'?"))
+		return envoycache.NilSnapshot{}, rpts, &validation.ProxyReport{}, nil
 	}
-	return envoycache.NilSnapshot{}, nil, nil
+	return envoycache.NilSnapshot{}, nil, &validation.ProxyReport{}, nil
 }
+
+var _ envoycache.SnapshotCache = &mockXdsCache{}
 
 type mockXdsCache struct {
 	called bool
@@ -118,6 +127,10 @@ func (*mockXdsCache) GetStatusKeys() []string {
 func (c *mockXdsCache) SetSnapshot(node string, snapshot envoycache.Snapshot) error {
 	c.called = true
 	return nil
+}
+
+func (c *mockXdsCache) GetSnapshot(node string) (envoycache.Snapshot, error) {
+	return &envoycache.NilSnapshot{}, nil
 }
 
 func (*mockXdsCache) ClearSnapshot(node string) {

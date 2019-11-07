@@ -3,6 +3,7 @@
 package v1
 
 import (
+	"log"
 	"sort"
 
 	"github.com/solo-io/go-utils/hashutils"
@@ -30,10 +31,16 @@ func (r *Secret) SetMetadata(meta core.Metadata) {
 func (r *Secret) Hash() uint64 {
 	metaCopy := r.GetMetadata()
 	metaCopy.ResourceVersion = ""
+	metaCopy.Generation = 0
+	// investigate zeroing out owner refs as well
 	return hashutils.HashAll(
 		metaCopy,
 		r.Kind,
 	)
+}
+
+func (r *Secret) GroupVersionKind() schema.GroupVersionKind {
+	return SecretGVK
 }
 
 type SecretList []*Secret
@@ -109,8 +116,6 @@ func (list SecretList) AsInterfaces() []interface{} {
 	return asInterfaces
 }
 
-var _ resources.Resource = &Secret{}
-
 // Kubernetes Adapter for Secret
 
 func (o *Secret) GetObjectKind() schema.ObjectKind {
@@ -122,11 +127,32 @@ func (o *Secret) DeepCopyObject() runtime.Object {
 	return resources.Clone(o).(*Secret)
 }
 
-var SecretCrd = crd.NewCrd("gloo.solo.io",
-	"secrets",
-	"gloo.solo.io",
-	"v1",
-	"Secret",
-	"sec",
-	false,
-	&Secret{})
+func (o *Secret) DeepCopyInto(out *Secret) {
+	clone := resources.Clone(o).(*Secret)
+	*out = *clone
+}
+
+var (
+	SecretCrd = crd.NewCrd(
+		"secrets",
+		SecretGVK.Group,
+		SecretGVK.Version,
+		SecretGVK.Kind,
+		"sec",
+		false,
+		&Secret{})
+)
+
+func init() {
+	if err := crd.AddCrd(SecretCrd); err != nil {
+		log.Fatalf("could not add crd to global registry")
+	}
+}
+
+var (
+	SecretGVK = schema.GroupVersionKind{
+		Version: "v1",
+		Group:   "gloo.solo.io",
+		Kind:    "Secret",
+	}
+)

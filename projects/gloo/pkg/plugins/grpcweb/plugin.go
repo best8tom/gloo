@@ -1,17 +1,14 @@
 package grpcweb
 
 import (
-	envoyhttp "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/http_connection_manager/v2"
 	envoyutil "github.com/envoyproxy/go-control-plane/pkg/util"
 
 	v1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1"
 	"github.com/solo-io/gloo/projects/gloo/pkg/plugins"
 )
 
-const (
-	// filter info
-	pluginStage = plugins.PostInAuth
-)
+// filter info
+var pluginStage = plugins.AfterStage(plugins.AuthZStage)
 
 func NewPlugin() *Plugin {
 	return &Plugin{}
@@ -47,9 +44,6 @@ func (p *Plugin) HttpFilters(params plugins.Params, listener *v1.HttpListener) (
 		return nil, nil
 	}
 	return []plugins.StagedHttpFilter{
-		{
-			HttpFilter: &envoyhttp.HttpFilter{Name: envoyutil.GRPCWeb},
-			Stage:      pluginStage,
-		},
+		plugins.NewStagedFilter(envoyutil.GRPCWeb, pluginStage),
 	}, nil
 }

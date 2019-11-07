@@ -1,4 +1,4 @@
-{{- if .Values.rbac.create }}
+{{- if .Values.global.glooRbac.create }}
 
 {{- if .Values.ingress.enabled }}
 kind: ClusterRole
@@ -8,6 +8,10 @@ metadata:
     labels:
         app: gloo
         gloo: rbac
+        installationId: {{ include "gloo.installationId" . }}
+    annotations:
+      "helm.sh/hook": "pre-install"
+      "helm.sh/hook-weight": "10"
 rules:
 - apiGroups: [""]
   resources: ["pods", "services", "secrets", "endpoints", "configmaps"]
@@ -18,8 +22,8 @@ rules:
 - apiGroups: ["apiextensions.k8s.io"]
   resources: ["customresourcedefinitions"]
   verbs: ["get", "create"]
-- apiGroups: ["gloo.solo.io"]
-  resources: ["settings", "upstreams","upstreamgroups", "proxies","virtualservices"]
+- apiGroups: ["gloo.solo.io", "enterprise.gloo.solo.io"]
+  resources: ["settings", "upstreams","upstreamgroups", "proxies","virtualservices", "routetables", "authconfigs"]
   verbs: ["*"]
 - apiGroups: ["extensions", ""]
   resources: ["ingresses"]

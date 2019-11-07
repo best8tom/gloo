@@ -11,6 +11,9 @@ import (
 	_ "github.com/gogo/protobuf/gogoproto"
 	proto "github.com/gogo/protobuf/proto"
 	types "github.com/gogo/protobuf/types"
+	v1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/enterprise/plugins/extauth/v1"
+	ratelimit "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/enterprise/plugins/ratelimit"
+	rbac "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/enterprise/plugins/rbac"
 	core "github.com/solo-io/solo-kit/pkg/api/v1/resources/core"
 )
 
@@ -23,49 +26,120 @@ var _ = math.Inf
 // is compatible with the proto package it is being compiled against.
 // A compilation error at this line likely means your copy of the
 // proto package needs to be updated.
-const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
+const _ = proto.GoGoProtoPackageIsVersion3 // please upgrade the proto package
 
-//
-//@solo-kit:resource.short_name=st
-//@solo-kit:resource.plural_name=settings
+// Possible modes for running the function discovery service (FDS). FDS polls services in-cluster for Swagger
+// and gRPC endpoints. This behavior can be controlled with the use of annotations.
+// FdsMode specifies what policy FDS will use when determining which services to poll.
+type Settings_DiscoveryOptions_FdsMode int32
+
+const (
+	// In BLACKLIST mode (default), FDS will poll all services in cluster except those services labeled with
+	// `discovery.solo.io/function_discovery=disabled`. This label can also be used on namespaces to apply to
+	// all services within a namespace **which are not explicitly whitelisted**.
+	// Note that `kube-system` and `kube-public` namespaces must be explicitly whitelisted even in blacklist mode.
+	Settings_DiscoveryOptions_BLACKLIST Settings_DiscoveryOptions_FdsMode = 0
+	// In WHITELIST mode, FDS will poll only services in cluster labeled with
+	// `discovery.solo.io/function_discovery=enabled`. This label can also be used on namespaces to apply to all
+	// services **which are not explicitly blacklisted** within a namespace.
+	Settings_DiscoveryOptions_WHITELIST Settings_DiscoveryOptions_FdsMode = 1
+	// In DISABLED mode, FDS will not run.
+	Settings_DiscoveryOptions_DISABLED Settings_DiscoveryOptions_FdsMode = 2
+)
+
+var Settings_DiscoveryOptions_FdsMode_name = map[int32]string{
+	0: "BLACKLIST",
+	1: "WHITELIST",
+	2: "DISABLED",
+}
+
+var Settings_DiscoveryOptions_FdsMode_value = map[string]int32{
+	"BLACKLIST": 0,
+	"WHITELIST": 1,
+	"DISABLED":  2,
+}
+
+func (x Settings_DiscoveryOptions_FdsMode) String() string {
+	return proto.EnumName(Settings_DiscoveryOptions_FdsMode_name, int32(x))
+}
+
+func (Settings_DiscoveryOptions_FdsMode) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor_bd7533c2495e1752, []int{0, 7, 0}
+}
+
+// Represents global settings for all the Gloo components.
 type Settings struct {
-	// namespace to write discovered data
+	// This is the namespace to which Gloo controllers will write their own resources, e.g. discovered Upstreams or default Gateways.
+	// If empty, this will default to "gloo-system".
 	DiscoveryNamespace string `protobuf:"bytes,1,opt,name=discovery_namespace,json=discoveryNamespace,proto3" json:"discovery_namespace,omitempty"`
-	// namespaces to watch for user config as well as services
-	// TODO(ilackarms): split out watch_namespaces and service_discovery_namespaces...
+	// Use this setting to restrict the namespaces that Gloo controllers take into consideration when watching for resources.In a
+	// usual production scenario, RBAC policies will limit the namespaces that Gloo has access to. If `watch_namespaces`
+	// contains namespaces outside of this whitelist, Gloo will fail to start.
+	//
+	// If not set, this defaults to all available namespaces. Please note that, the `discovery_namespace` will always
+	// be included in this list.
 	WatchNamespaces []string `protobuf:"bytes,2,rep,name=watch_namespaces,json=watchNamespaces,proto3" json:"watch_namespaces,omitempty"`
-	// where to read user config (upstream, proxy) from
-	// if nil, use only in memory config
+	// This setting determines where Gloo controllers will store its resources
 	//
 	// Types that are valid to be assigned to ConfigSource:
 	//	*Settings_KubernetesConfigSource
 	//	*Settings_DirectoryConfigSource
+	//	*Settings_ConsulKvSource
 	ConfigSource isSettings_ConfigSource `protobuf_oneof:"config_source"`
-	// where to read secrets from (vault, k8s)
+	// Determines where Gloo will read/write secrets from/to.
 	//
 	// Types that are valid to be assigned to SecretSource:
 	//	*Settings_KubernetesSecretSource
 	//	*Settings_VaultSecretSource
 	//	*Settings_DirectorySecretSource
 	SecretSource isSettings_SecretSource `protobuf_oneof:"secret_source"`
-	// where to read artifacts from (configmap, file)
+	// Where to read artifacts from.
 	//
 	// Types that are valid to be assigned to ArtifactSource:
 	//	*Settings_KubernetesArtifactSource
 	//	*Settings_DirectoryArtifactSource
+	//	*Settings_ConsulKvArtifactSource
 	ArtifactSource isSettings_ArtifactSource `protobuf_oneof:"artifact_source"`
-	// where the gloo xds server should bind (should not need configuration by user)
-	BindAddr string `protobuf:"bytes,11,opt,name=bind_addr,json=bindAddr,proto3" json:"bind_addr,omitempty"`
-	// how frequently to resync watches, etc
+	// Where the Gloo xDS server should bind (should not need configuration by user)
+	// Deprecated: use gloo.xdsBindAddr
+	BindAddr string `protobuf:"bytes,11,opt,name=bind_addr,json=bindAddr,proto3" json:"bind_addr,omitempty"` // Deprecated: Do not use.
+	// How frequently to resync watches, etc
 	RefreshRate *types.Duration `protobuf:"bytes,12,opt,name=refresh_rate,json=refreshRate,proto3" json:"refresh_rate,omitempty"`
-	// enable serving debug data on port 9090
+	// Enable serving debug data on port 9090
 	DevMode bool `protobuf:"varint,13,opt,name=dev_mode,json=devMode,proto3" json:"dev_mode,omitempty"`
-	// enable automatic linkerd upstream header addition for easier routing to linkerd services
+	// Enable automatic linkerd upstream header addition for easier routing to linkerd services
 	Linkerd bool `protobuf:"varint,17,opt,name=linkerd,proto3" json:"linkerd,omitempty"`
 	// Default circuit breakers when not set in a specific upstream.
-	CircuitBreakers *CircuitBreakerConfig `protobuf:"bytes,3,opt,name=circuit_breakers,json=circuitBreakers,proto3" json:"circuit_breakers,omitempty"`
-	// Settings for extensions
-	Extensions *Extensions `protobuf:"bytes,16,opt,name=extensions,proto3" json:"extensions,omitempty"`
+	// Deprecated: use gloo.circuitBreakers
+	CircuitBreakers *CircuitBreakerConfig `protobuf:"bytes,3,opt,name=circuit_breakers,json=circuitBreakers,proto3" json:"circuit_breakers,omitempty"` // Deprecated: Do not use.
+	// Configuration options for the Clusteringress Controller (for Knative).
+	Knative *Settings_KnativeOptions `protobuf:"bytes,18,opt,name=knative,proto3" json:"knative,omitempty"`
+	// Options for configuring Gloo's Discovery service
+	Discovery *Settings_DiscoveryOptions `protobuf:"bytes,19,opt,name=discovery,proto3" json:"discovery,omitempty"`
+	// Options for configuring `gloo`, the core Gloo controller,
+	// which serves dynamic configuration to Envoy
+	Gloo *GlooOptions `protobuf:"bytes,24,opt,name=gloo,proto3" json:"gloo,omitempty"`
+	// Options for configuring `gateway`, the Gateway Gloo controller,
+	// which enables the VirtualService/Gateway API in Gloo
+	Gateway *GatewayOptions `protobuf:"bytes,25,opt,name=gateway,proto3" json:"gateway,omitempty"`
+	// Options to configure Gloo's integration with [HashiCorp Consul](https://www.consul.io/).
+	Consul *Settings_ConsulConfiguration `protobuf:"bytes,20,opt,name=consul,proto3" json:"consul,omitempty"`
+	// Options to configure Gloo's integration with [Kubernetes](https://www.kubernetes.io/).
+	Kubernetes *Settings_KubernetesConfiguration `protobuf:"bytes,22,opt,name=kubernetes,proto3" json:"kubernetes,omitempty"`
+	// Deprecated: Opaque settings config for Gloo extensions
+	Extensions *Extensions `protobuf:"bytes,16,opt,name=extensions,proto3" json:"extensions,omitempty"` // Deprecated: Do not use.
+	// Enterprise-only: Partial config for GlooE's rate-limiting service, based on Envoy's rate-limit service;
+	// supports Envoy's rate-limit service API. (reference here: https://github.com/lyft/ratelimit#configuration)
+	// Configure rate-limit *descriptors* here, which define the limits for requests based on their descriptors.
+	// Configure rate-limit *actions*, which define how request characteristics get translated into descriptors,
+	// on the VirtualHost or its routes
+	Ratelimit *ratelimit.ServiceSettings `protobuf:"bytes,26,opt,name=ratelimit,proto3" json:"ratelimit,omitempty"`
+	// Enterprise-only: Settings for the rate limiting server itself
+	RatelimitServer *ratelimit.Settings `protobuf:"bytes,27,opt,name=ratelimit_server,json=ratelimitServer,proto3" json:"ratelimit_server,omitempty"`
+	// Enterprise-only: Settings for RBAC across all Gloo resources (VirtualServices, Routes, etc.)
+	Rbac *rbac.Settings `protobuf:"bytes,28,opt,name=rbac,proto3" json:"rbac,omitempty"`
+	// Enterprise-only: External auth related settings
+	Extauth *v1.Settings `protobuf:"bytes,29,opt,name=extauth,proto3" json:"extauth,omitempty"`
 	// Metadata contains the object metadata for this resource
 	Metadata core.Metadata `protobuf:"bytes,14,opt,name=metadata,proto3" json:"metadata"`
 	// Status indicates the validation status of this resource.
@@ -114,34 +188,42 @@ type isSettings_ArtifactSource interface {
 }
 
 type Settings_KubernetesConfigSource struct {
-	KubernetesConfigSource *Settings_KubernetesCrds `protobuf:"bytes,4,opt,name=kubernetes_config_source,json=kubernetesConfigSource,proto3,oneof"`
+	KubernetesConfigSource *Settings_KubernetesCrds `protobuf:"bytes,4,opt,name=kubernetes_config_source,json=kubernetesConfigSource,proto3,oneof" json:"kubernetes_config_source,omitempty"`
 }
 type Settings_DirectoryConfigSource struct {
-	DirectoryConfigSource *Settings_Directory `protobuf:"bytes,5,opt,name=directory_config_source,json=directoryConfigSource,proto3,oneof"`
+	DirectoryConfigSource *Settings_Directory `protobuf:"bytes,5,opt,name=directory_config_source,json=directoryConfigSource,proto3,oneof" json:"directory_config_source,omitempty"`
+}
+type Settings_ConsulKvSource struct {
+	ConsulKvSource *Settings_ConsulKv `protobuf:"bytes,21,opt,name=consul_kv_source,json=consulKvSource,proto3,oneof" json:"consul_kv_source,omitempty"`
 }
 type Settings_KubernetesSecretSource struct {
-	KubernetesSecretSource *Settings_KubernetesSecrets `protobuf:"bytes,6,opt,name=kubernetes_secret_source,json=kubernetesSecretSource,proto3,oneof"`
+	KubernetesSecretSource *Settings_KubernetesSecrets `protobuf:"bytes,6,opt,name=kubernetes_secret_source,json=kubernetesSecretSource,proto3,oneof" json:"kubernetes_secret_source,omitempty"`
 }
 type Settings_VaultSecretSource struct {
-	VaultSecretSource *Settings_VaultSecrets `protobuf:"bytes,7,opt,name=vault_secret_source,json=vaultSecretSource,proto3,oneof"`
+	VaultSecretSource *Settings_VaultSecrets `protobuf:"bytes,7,opt,name=vault_secret_source,json=vaultSecretSource,proto3,oneof" json:"vault_secret_source,omitempty"`
 }
 type Settings_DirectorySecretSource struct {
-	DirectorySecretSource *Settings_Directory `protobuf:"bytes,8,opt,name=directory_secret_source,json=directorySecretSource,proto3,oneof"`
+	DirectorySecretSource *Settings_Directory `protobuf:"bytes,8,opt,name=directory_secret_source,json=directorySecretSource,proto3,oneof" json:"directory_secret_source,omitempty"`
 }
 type Settings_KubernetesArtifactSource struct {
-	KubernetesArtifactSource *Settings_KubernetesConfigmaps `protobuf:"bytes,9,opt,name=kubernetes_artifact_source,json=kubernetesArtifactSource,proto3,oneof"`
+	KubernetesArtifactSource *Settings_KubernetesConfigmaps `protobuf:"bytes,9,opt,name=kubernetes_artifact_source,json=kubernetesArtifactSource,proto3,oneof" json:"kubernetes_artifact_source,omitempty"`
 }
 type Settings_DirectoryArtifactSource struct {
-	DirectoryArtifactSource *Settings_Directory `protobuf:"bytes,10,opt,name=directory_artifact_source,json=directoryArtifactSource,proto3,oneof"`
+	DirectoryArtifactSource *Settings_Directory `protobuf:"bytes,10,opt,name=directory_artifact_source,json=directoryArtifactSource,proto3,oneof" json:"directory_artifact_source,omitempty"`
+}
+type Settings_ConsulKvArtifactSource struct {
+	ConsulKvArtifactSource *Settings_ConsulKv `protobuf:"bytes,23,opt,name=consul_kv_artifact_source,json=consulKvArtifactSource,proto3,oneof" json:"consul_kv_artifact_source,omitempty"`
 }
 
 func (*Settings_KubernetesConfigSource) isSettings_ConfigSource()     {}
 func (*Settings_DirectoryConfigSource) isSettings_ConfigSource()      {}
+func (*Settings_ConsulKvSource) isSettings_ConfigSource()             {}
 func (*Settings_KubernetesSecretSource) isSettings_SecretSource()     {}
 func (*Settings_VaultSecretSource) isSettings_SecretSource()          {}
 func (*Settings_DirectorySecretSource) isSettings_SecretSource()      {}
 func (*Settings_KubernetesArtifactSource) isSettings_ArtifactSource() {}
 func (*Settings_DirectoryArtifactSource) isSettings_ArtifactSource()  {}
+func (*Settings_ConsulKvArtifactSource) isSettings_ArtifactSource()   {}
 
 func (m *Settings) GetConfigSource() isSettings_ConfigSource {
 	if m != nil {
@@ -190,6 +272,13 @@ func (m *Settings) GetDirectoryConfigSource() *Settings_Directory {
 	return nil
 }
 
+func (m *Settings) GetConsulKvSource() *Settings_ConsulKv {
+	if x, ok := m.GetConfigSource().(*Settings_ConsulKvSource); ok {
+		return x.ConsulKvSource
+	}
+	return nil
+}
+
 func (m *Settings) GetKubernetesSecretSource() *Settings_KubernetesSecrets {
 	if x, ok := m.GetSecretSource().(*Settings_KubernetesSecretSource); ok {
 		return x.KubernetesSecretSource
@@ -225,6 +314,14 @@ func (m *Settings) GetDirectoryArtifactSource() *Settings_Directory {
 	return nil
 }
 
+func (m *Settings) GetConsulKvArtifactSource() *Settings_ConsulKv {
+	if x, ok := m.GetArtifactSource().(*Settings_ConsulKvArtifactSource); ok {
+		return x.ConsulKvArtifactSource
+	}
+	return nil
+}
+
+// Deprecated: Do not use.
 func (m *Settings) GetBindAddr() string {
 	if m != nil {
 		return m.BindAddr
@@ -253,6 +350,7 @@ func (m *Settings) GetLinkerd() bool {
 	return false
 }
 
+// Deprecated: Do not use.
 func (m *Settings) GetCircuitBreakers() *CircuitBreakerConfig {
 	if m != nil {
 		return m.CircuitBreakers
@@ -260,9 +358,80 @@ func (m *Settings) GetCircuitBreakers() *CircuitBreakerConfig {
 	return nil
 }
 
+func (m *Settings) GetKnative() *Settings_KnativeOptions {
+	if m != nil {
+		return m.Knative
+	}
+	return nil
+}
+
+func (m *Settings) GetDiscovery() *Settings_DiscoveryOptions {
+	if m != nil {
+		return m.Discovery
+	}
+	return nil
+}
+
+func (m *Settings) GetGloo() *GlooOptions {
+	if m != nil {
+		return m.Gloo
+	}
+	return nil
+}
+
+func (m *Settings) GetGateway() *GatewayOptions {
+	if m != nil {
+		return m.Gateway
+	}
+	return nil
+}
+
+func (m *Settings) GetConsul() *Settings_ConsulConfiguration {
+	if m != nil {
+		return m.Consul
+	}
+	return nil
+}
+
+func (m *Settings) GetKubernetes() *Settings_KubernetesConfiguration {
+	if m != nil {
+		return m.Kubernetes
+	}
+	return nil
+}
+
+// Deprecated: Do not use.
 func (m *Settings) GetExtensions() *Extensions {
 	if m != nil {
 		return m.Extensions
+	}
+	return nil
+}
+
+func (m *Settings) GetRatelimit() *ratelimit.ServiceSettings {
+	if m != nil {
+		return m.Ratelimit
+	}
+	return nil
+}
+
+func (m *Settings) GetRatelimitServer() *ratelimit.Settings {
+	if m != nil {
+		return m.RatelimitServer
+	}
+	return nil
+}
+
+func (m *Settings) GetRbac() *rbac.Settings {
+	if m != nil {
+		return m.Rbac
+	}
+	return nil
+}
+
+func (m *Settings) GetExtauth() *v1.Settings {
+	if m != nil {
+		return m.Extauth
 	}
 	return nil
 }
@@ -281,200 +450,22 @@ func (m *Settings) GetStatus() core.Status {
 	return core.Status{}
 }
 
-// XXX_OneofFuncs is for the internal use of the proto package.
-func (*Settings) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
-	return _Settings_OneofMarshaler, _Settings_OneofUnmarshaler, _Settings_OneofSizer, []interface{}{
+// XXX_OneofWrappers is for the internal use of the proto package.
+func (*Settings) XXX_OneofWrappers() []interface{} {
+	return []interface{}{
 		(*Settings_KubernetesConfigSource)(nil),
 		(*Settings_DirectoryConfigSource)(nil),
+		(*Settings_ConsulKvSource)(nil),
 		(*Settings_KubernetesSecretSource)(nil),
 		(*Settings_VaultSecretSource)(nil),
 		(*Settings_DirectorySecretSource)(nil),
 		(*Settings_KubernetesArtifactSource)(nil),
 		(*Settings_DirectoryArtifactSource)(nil),
+		(*Settings_ConsulKvArtifactSource)(nil),
 	}
 }
 
-func _Settings_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
-	m := msg.(*Settings)
-	// config_source
-	switch x := m.ConfigSource.(type) {
-	case *Settings_KubernetesConfigSource:
-		_ = b.EncodeVarint(4<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.KubernetesConfigSource); err != nil {
-			return err
-		}
-	case *Settings_DirectoryConfigSource:
-		_ = b.EncodeVarint(5<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.DirectoryConfigSource); err != nil {
-			return err
-		}
-	case nil:
-	default:
-		return fmt.Errorf("Settings.ConfigSource has unexpected type %T", x)
-	}
-	// secret_source
-	switch x := m.SecretSource.(type) {
-	case *Settings_KubernetesSecretSource:
-		_ = b.EncodeVarint(6<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.KubernetesSecretSource); err != nil {
-			return err
-		}
-	case *Settings_VaultSecretSource:
-		_ = b.EncodeVarint(7<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.VaultSecretSource); err != nil {
-			return err
-		}
-	case *Settings_DirectorySecretSource:
-		_ = b.EncodeVarint(8<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.DirectorySecretSource); err != nil {
-			return err
-		}
-	case nil:
-	default:
-		return fmt.Errorf("Settings.SecretSource has unexpected type %T", x)
-	}
-	// artifact_source
-	switch x := m.ArtifactSource.(type) {
-	case *Settings_KubernetesArtifactSource:
-		_ = b.EncodeVarint(9<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.KubernetesArtifactSource); err != nil {
-			return err
-		}
-	case *Settings_DirectoryArtifactSource:
-		_ = b.EncodeVarint(10<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.DirectoryArtifactSource); err != nil {
-			return err
-		}
-	case nil:
-	default:
-		return fmt.Errorf("Settings.ArtifactSource has unexpected type %T", x)
-	}
-	return nil
-}
-
-func _Settings_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
-	m := msg.(*Settings)
-	switch tag {
-	case 4: // config_source.kubernetes_config_source
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(Settings_KubernetesCrds)
-		err := b.DecodeMessage(msg)
-		m.ConfigSource = &Settings_KubernetesConfigSource{msg}
-		return true, err
-	case 5: // config_source.directory_config_source
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(Settings_Directory)
-		err := b.DecodeMessage(msg)
-		m.ConfigSource = &Settings_DirectoryConfigSource{msg}
-		return true, err
-	case 6: // secret_source.kubernetes_secret_source
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(Settings_KubernetesSecrets)
-		err := b.DecodeMessage(msg)
-		m.SecretSource = &Settings_KubernetesSecretSource{msg}
-		return true, err
-	case 7: // secret_source.vault_secret_source
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(Settings_VaultSecrets)
-		err := b.DecodeMessage(msg)
-		m.SecretSource = &Settings_VaultSecretSource{msg}
-		return true, err
-	case 8: // secret_source.directory_secret_source
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(Settings_Directory)
-		err := b.DecodeMessage(msg)
-		m.SecretSource = &Settings_DirectorySecretSource{msg}
-		return true, err
-	case 9: // artifact_source.kubernetes_artifact_source
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(Settings_KubernetesConfigmaps)
-		err := b.DecodeMessage(msg)
-		m.ArtifactSource = &Settings_KubernetesArtifactSource{msg}
-		return true, err
-	case 10: // artifact_source.directory_artifact_source
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(Settings_Directory)
-		err := b.DecodeMessage(msg)
-		m.ArtifactSource = &Settings_DirectoryArtifactSource{msg}
-		return true, err
-	default:
-		return false, nil
-	}
-}
-
-func _Settings_OneofSizer(msg proto.Message) (n int) {
-	m := msg.(*Settings)
-	// config_source
-	switch x := m.ConfigSource.(type) {
-	case *Settings_KubernetesConfigSource:
-		s := proto.Size(x.KubernetesConfigSource)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Settings_DirectoryConfigSource:
-		s := proto.Size(x.DirectoryConfigSource)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
-	}
-	// secret_source
-	switch x := m.SecretSource.(type) {
-	case *Settings_KubernetesSecretSource:
-		s := proto.Size(x.KubernetesSecretSource)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Settings_VaultSecretSource:
-		s := proto.Size(x.VaultSecretSource)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Settings_DirectorySecretSource:
-		s := proto.Size(x.DirectorySecretSource)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
-	}
-	// artifact_source
-	switch x := m.ArtifactSource.(type) {
-	case *Settings_KubernetesArtifactSource:
-		s := proto.Size(x.KubernetesArtifactSource)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Settings_DirectoryArtifactSource:
-		s := proto.Size(x.DirectoryArtifactSource)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
-	}
-	return n
-}
-
-// ilackarms(todo: make sure these are configurable)
+// Use Kubernetes CRDs as storage.
 type Settings_KubernetesCrds struct {
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
@@ -505,6 +496,7 @@ func (m *Settings_KubernetesCrds) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_Settings_KubernetesCrds proto.InternalMessageInfo
 
+// Use Kubernetes as storage for secret data.
 type Settings_KubernetesSecrets struct {
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
@@ -535,7 +527,32 @@ func (m *Settings_KubernetesSecrets) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_Settings_KubernetesSecrets proto.InternalMessageInfo
 
+// Use [HashiCorp Vault](https://www.vaultproject.io/) as storage for secret data.
 type Settings_VaultSecrets struct {
+	// the Token used to authenticate to Vault
+	Token string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	// address is the address of the Vault server. This should be a complete
+	// URL such as "http://vault.example.com".
+	Address string `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
+	// caCert is the path to a PEM-encoded CA cert file to use to verify the
+	// Vault server SSL certificate.
+	CaCert string `protobuf:"bytes,3,opt,name=ca_cert,json=caCert,proto3" json:"ca_cert,omitempty"`
+	// caPath is the path to a directory of PEM-encoded CA cert files to verify
+	// the Vault server SSL certificate.
+	CaPath string `protobuf:"bytes,4,opt,name=ca_path,json=caPath,proto3" json:"ca_path,omitempty"`
+	// clientCert is the path to the certificate for Vault communication
+	ClientCert string `protobuf:"bytes,5,opt,name=client_cert,json=clientCert,proto3" json:"client_cert,omitempty"`
+	// clientKey is the path to the private key for Vault communication
+	ClientKey string `protobuf:"bytes,6,opt,name=client_key,json=clientKey,proto3" json:"client_key,omitempty"`
+	// tlsServerName, if set, is used to set the SNI host when connecting via
+	// TLS.
+	TlsServerName string `protobuf:"bytes,7,opt,name=tls_server_name,json=tlsServerName,proto3" json:"tls_server_name,omitempty"`
+	// Insecure enables or disables SSL verification
+	Insecure *types.BoolValue `protobuf:"bytes,8,opt,name=insecure,proto3" json:"insecure,omitempty"`
+	// all keys stored in Vault will begin with this Vault
+	// this can be used to run multiple instances of Gloo against the same Consul cluster
+	// defaults to `gloo`
+	RootKey              string   `protobuf:"bytes,9,opt,name=root_key,json=rootKey,proto3" json:"root_key,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
@@ -565,6 +582,114 @@ func (m *Settings_VaultSecrets) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_Settings_VaultSecrets proto.InternalMessageInfo
 
+func (m *Settings_VaultSecrets) GetToken() string {
+	if m != nil {
+		return m.Token
+	}
+	return ""
+}
+
+func (m *Settings_VaultSecrets) GetAddress() string {
+	if m != nil {
+		return m.Address
+	}
+	return ""
+}
+
+func (m *Settings_VaultSecrets) GetCaCert() string {
+	if m != nil {
+		return m.CaCert
+	}
+	return ""
+}
+
+func (m *Settings_VaultSecrets) GetCaPath() string {
+	if m != nil {
+		return m.CaPath
+	}
+	return ""
+}
+
+func (m *Settings_VaultSecrets) GetClientCert() string {
+	if m != nil {
+		return m.ClientCert
+	}
+	return ""
+}
+
+func (m *Settings_VaultSecrets) GetClientKey() string {
+	if m != nil {
+		return m.ClientKey
+	}
+	return ""
+}
+
+func (m *Settings_VaultSecrets) GetTlsServerName() string {
+	if m != nil {
+		return m.TlsServerName
+	}
+	return ""
+}
+
+func (m *Settings_VaultSecrets) GetInsecure() *types.BoolValue {
+	if m != nil {
+		return m.Insecure
+	}
+	return nil
+}
+
+func (m *Settings_VaultSecrets) GetRootKey() string {
+	if m != nil {
+		return m.RootKey
+	}
+	return ""
+}
+
+// Use [HashiCorp Consul Key-Value](https://www.consul.io/api/kv.html/) as storage for config data.
+// Configuration options for connecting to Consul can be configured in the Settings' root
+// `consul` field
+type Settings_ConsulKv struct {
+	// all keys stored in Consul will begin with this prefix
+	// this can be used to run multiple instances of Gloo against the same Consul cluster
+	// defaults to `gloo`
+	RootKey              string   `protobuf:"bytes,1,opt,name=root_key,json=rootKey,proto3" json:"root_key,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *Settings_ConsulKv) Reset()         { *m = Settings_ConsulKv{} }
+func (m *Settings_ConsulKv) String() string { return proto.CompactTextString(m) }
+func (*Settings_ConsulKv) ProtoMessage()    {}
+func (*Settings_ConsulKv) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bd7533c2495e1752, []int{0, 3}
+}
+func (m *Settings_ConsulKv) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_Settings_ConsulKv.Unmarshal(m, b)
+}
+func (m *Settings_ConsulKv) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_Settings_ConsulKv.Marshal(b, m, deterministic)
+}
+func (m *Settings_ConsulKv) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Settings_ConsulKv.Merge(m, src)
+}
+func (m *Settings_ConsulKv) XXX_Size() int {
+	return xxx_messageInfo_Settings_ConsulKv.Size(m)
+}
+func (m *Settings_ConsulKv) XXX_DiscardUnknown() {
+	xxx_messageInfo_Settings_ConsulKv.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_Settings_ConsulKv proto.InternalMessageInfo
+
+func (m *Settings_ConsulKv) GetRootKey() string {
+	if m != nil {
+		return m.RootKey
+	}
+	return ""
+}
+
+// Use Kubernetes ConfigMaps as storage.
 type Settings_KubernetesConfigmaps struct {
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
@@ -575,7 +700,7 @@ func (m *Settings_KubernetesConfigmaps) Reset()         { *m = Settings_Kubernet
 func (m *Settings_KubernetesConfigmaps) String() string { return proto.CompactTextString(m) }
 func (*Settings_KubernetesConfigmaps) ProtoMessage()    {}
 func (*Settings_KubernetesConfigmaps) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bd7533c2495e1752, []int{0, 3}
+	return fileDescriptor_bd7533c2495e1752, []int{0, 4}
 }
 func (m *Settings_KubernetesConfigmaps) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_Settings_KubernetesConfigmaps.Unmarshal(m, b)
@@ -595,6 +720,8 @@ func (m *Settings_KubernetesConfigmaps) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_Settings_KubernetesConfigmaps proto.InternalMessageInfo
 
+// As an alternative to Kubernetes CRDs, Gloo is able to store resources in a local file system.
+// This option determines the root of the directory tree used to this end.
 type Settings_Directory struct {
 	Directory            string   `protobuf:"bytes,1,opt,name=directory,proto3" json:"directory,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
@@ -606,7 +733,7 @@ func (m *Settings_Directory) Reset()         { *m = Settings_Directory{} }
 func (m *Settings_Directory) String() string { return proto.CompactTextString(m) }
 func (*Settings_Directory) ProtoMessage()    {}
 func (*Settings_Directory) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bd7533c2495e1752, []int{0, 4}
+	return fileDescriptor_bd7533c2495e1752, []int{0, 5}
 }
 func (m *Settings_Directory) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_Settings_Directory.Unmarshal(m, b)
@@ -633,13 +760,689 @@ func (m *Settings_Directory) GetDirectory() string {
 	return ""
 }
 
+type Settings_KnativeOptions struct {
+	// Address of the clusteringress proxy.
+	// If empty, it will default to clusteringress-proxy.$POD_NAMESPACE.svc.cluster.local.
+	// Use if running Knative Version 0.7.X or less
+	ClusterIngressProxyAddress string `protobuf:"bytes,1,opt,name=cluster_ingress_proxy_address,json=clusterIngressProxyAddress,proto3" json:"cluster_ingress_proxy_address,omitempty"`
+	// Address of the externally-facing knative proxy.
+	// If empty, it will default to knative-external-proxy.$POD_NAMESPACE.svc.cluster.local.
+	// Use if running Knative Version 0.8.X or higher
+	KnativeExternalProxyAddress string `protobuf:"bytes,2,opt,name=knative_external_proxy_address,json=knativeExternalProxyAddress,proto3" json:"knative_external_proxy_address,omitempty"`
+	// Address of the internally-facing knative proxy.
+	// If empty, it will default to knative-internal-proxy.$POD_NAMESPACE.svc.cluster.local.
+	// Use if running Knative Version 0.8.X or higher
+	KnativeInternalProxyAddress string   `protobuf:"bytes,3,opt,name=knative_internal_proxy_address,json=knativeInternalProxyAddress,proto3" json:"knative_internal_proxy_address,omitempty"`
+	XXX_NoUnkeyedLiteral        struct{} `json:"-"`
+	XXX_unrecognized            []byte   `json:"-"`
+	XXX_sizecache               int32    `json:"-"`
+}
+
+func (m *Settings_KnativeOptions) Reset()         { *m = Settings_KnativeOptions{} }
+func (m *Settings_KnativeOptions) String() string { return proto.CompactTextString(m) }
+func (*Settings_KnativeOptions) ProtoMessage()    {}
+func (*Settings_KnativeOptions) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bd7533c2495e1752, []int{0, 6}
+}
+func (m *Settings_KnativeOptions) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_Settings_KnativeOptions.Unmarshal(m, b)
+}
+func (m *Settings_KnativeOptions) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_Settings_KnativeOptions.Marshal(b, m, deterministic)
+}
+func (m *Settings_KnativeOptions) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Settings_KnativeOptions.Merge(m, src)
+}
+func (m *Settings_KnativeOptions) XXX_Size() int {
+	return xxx_messageInfo_Settings_KnativeOptions.Size(m)
+}
+func (m *Settings_KnativeOptions) XXX_DiscardUnknown() {
+	xxx_messageInfo_Settings_KnativeOptions.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_Settings_KnativeOptions proto.InternalMessageInfo
+
+func (m *Settings_KnativeOptions) GetClusterIngressProxyAddress() string {
+	if m != nil {
+		return m.ClusterIngressProxyAddress
+	}
+	return ""
+}
+
+func (m *Settings_KnativeOptions) GetKnativeExternalProxyAddress() string {
+	if m != nil {
+		return m.KnativeExternalProxyAddress
+	}
+	return ""
+}
+
+func (m *Settings_KnativeOptions) GetKnativeInternalProxyAddress() string {
+	if m != nil {
+		return m.KnativeInternalProxyAddress
+	}
+	return ""
+}
+
+type Settings_DiscoveryOptions struct {
+	FdsMode              Settings_DiscoveryOptions_FdsMode `protobuf:"varint,1,opt,name=fds_mode,json=fdsMode,proto3,enum=gloo.solo.io.Settings_DiscoveryOptions_FdsMode" json:"fds_mode,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}                          `json:"-"`
+	XXX_unrecognized     []byte                            `json:"-"`
+	XXX_sizecache        int32                             `json:"-"`
+}
+
+func (m *Settings_DiscoveryOptions) Reset()         { *m = Settings_DiscoveryOptions{} }
+func (m *Settings_DiscoveryOptions) String() string { return proto.CompactTextString(m) }
+func (*Settings_DiscoveryOptions) ProtoMessage()    {}
+func (*Settings_DiscoveryOptions) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bd7533c2495e1752, []int{0, 7}
+}
+func (m *Settings_DiscoveryOptions) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_Settings_DiscoveryOptions.Unmarshal(m, b)
+}
+func (m *Settings_DiscoveryOptions) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_Settings_DiscoveryOptions.Marshal(b, m, deterministic)
+}
+func (m *Settings_DiscoveryOptions) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Settings_DiscoveryOptions.Merge(m, src)
+}
+func (m *Settings_DiscoveryOptions) XXX_Size() int {
+	return xxx_messageInfo_Settings_DiscoveryOptions.Size(m)
+}
+func (m *Settings_DiscoveryOptions) XXX_DiscardUnknown() {
+	xxx_messageInfo_Settings_DiscoveryOptions.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_Settings_DiscoveryOptions proto.InternalMessageInfo
+
+func (m *Settings_DiscoveryOptions) GetFdsMode() Settings_DiscoveryOptions_FdsMode {
+	if m != nil {
+		return m.FdsMode
+	}
+	return Settings_DiscoveryOptions_BLACKLIST
+}
+
+// Provides overrides for the default configuration parameters used to connect to Consul.
+//
+// Note: It is also possible to configure the Consul client Gloo uses via the environment variables
+// described [here](https://www.consul.io/docs/commands/index.html#environment-variables). These
+// need to be set on the Gloo container.
+type Settings_ConsulConfiguration struct {
+	// The address of the Consul server.
+	// Defaults to the value of the standard CONSUL_HTTP_ADDR env if set, otherwise to 127.0.0.1:8500.
+	Address string `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	// Datacenter to use. If not provided, the default agent datacenter is used.
+	Datacenter string `protobuf:"bytes,2,opt,name=datacenter,proto3" json:"datacenter,omitempty"`
+	// Username to use for HTTP Basic Authentication
+	Username string `protobuf:"bytes,3,opt,name=username,proto3" json:"username,omitempty"`
+	// Password to use for HTTP Basic Authentication
+	Password string `protobuf:"bytes,4,opt,name=password,proto3" json:"password,omitempty"`
+	// Token is used to provide a per-request ACL token
+	// which overrides the agent's default token.
+	Token string `protobuf:"bytes,5,opt,name=token,proto3" json:"token,omitempty"`
+	// caFile is the optional path to the CA certificate used for Consul
+	// communication, defaults to the system bundle if not specified.
+	CaFile string `protobuf:"bytes,6,opt,name=ca_file,json=caFile,proto3" json:"ca_file,omitempty"`
+	// caPath is the optional path to a directory of CA certificates to use for
+	// Consul communication, defaults to the system bundle if not specified.
+	CaPath string `protobuf:"bytes,7,opt,name=ca_path,json=caPath,proto3" json:"ca_path,omitempty"`
+	// CertFile is the optional path to the certificate for Consul
+	// communication. If this is set then you need to also set KeyFile.
+	CertFile string `protobuf:"bytes,8,opt,name=cert_file,json=certFile,proto3" json:"cert_file,omitempty"`
+	// KeyFile is the optional path to the private key for Consul communication.
+	// If this is set then you need to also set CertFile.
+	KeyFile string `protobuf:"bytes,9,opt,name=key_file,json=keyFile,proto3" json:"key_file,omitempty"`
+	// InsecureSkipVerify if set to true will disable TLS host verification.
+	InsecureSkipVerify *types.BoolValue `protobuf:"bytes,10,opt,name=insecure_skip_verify,json=insecureSkipVerify,proto3" json:"insecure_skip_verify,omitempty"`
+	// WaitTime limits how long a watches for Consul resources will block.
+	// If not provided, the agent default values will be used.
+	WaitTime *types.Duration `protobuf:"bytes,11,opt,name=wait_time,json=waitTime,proto3" json:"wait_time,omitempty"`
+	// Enable Service Discovery via Consul with this field
+	// set to empty struct `{}` to enable with defaults
+	ServiceDiscovery     *Settings_ConsulConfiguration_ServiceDiscoveryOptions `protobuf:"bytes,12,opt,name=service_discovery,json=serviceDiscovery,proto3" json:"service_discovery,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}                                              `json:"-"`
+	XXX_unrecognized     []byte                                                `json:"-"`
+	XXX_sizecache        int32                                                 `json:"-"`
+}
+
+func (m *Settings_ConsulConfiguration) Reset()         { *m = Settings_ConsulConfiguration{} }
+func (m *Settings_ConsulConfiguration) String() string { return proto.CompactTextString(m) }
+func (*Settings_ConsulConfiguration) ProtoMessage()    {}
+func (*Settings_ConsulConfiguration) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bd7533c2495e1752, []int{0, 8}
+}
+func (m *Settings_ConsulConfiguration) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_Settings_ConsulConfiguration.Unmarshal(m, b)
+}
+func (m *Settings_ConsulConfiguration) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_Settings_ConsulConfiguration.Marshal(b, m, deterministic)
+}
+func (m *Settings_ConsulConfiguration) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Settings_ConsulConfiguration.Merge(m, src)
+}
+func (m *Settings_ConsulConfiguration) XXX_Size() int {
+	return xxx_messageInfo_Settings_ConsulConfiguration.Size(m)
+}
+func (m *Settings_ConsulConfiguration) XXX_DiscardUnknown() {
+	xxx_messageInfo_Settings_ConsulConfiguration.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_Settings_ConsulConfiguration proto.InternalMessageInfo
+
+func (m *Settings_ConsulConfiguration) GetAddress() string {
+	if m != nil {
+		return m.Address
+	}
+	return ""
+}
+
+func (m *Settings_ConsulConfiguration) GetDatacenter() string {
+	if m != nil {
+		return m.Datacenter
+	}
+	return ""
+}
+
+func (m *Settings_ConsulConfiguration) GetUsername() string {
+	if m != nil {
+		return m.Username
+	}
+	return ""
+}
+
+func (m *Settings_ConsulConfiguration) GetPassword() string {
+	if m != nil {
+		return m.Password
+	}
+	return ""
+}
+
+func (m *Settings_ConsulConfiguration) GetToken() string {
+	if m != nil {
+		return m.Token
+	}
+	return ""
+}
+
+func (m *Settings_ConsulConfiguration) GetCaFile() string {
+	if m != nil {
+		return m.CaFile
+	}
+	return ""
+}
+
+func (m *Settings_ConsulConfiguration) GetCaPath() string {
+	if m != nil {
+		return m.CaPath
+	}
+	return ""
+}
+
+func (m *Settings_ConsulConfiguration) GetCertFile() string {
+	if m != nil {
+		return m.CertFile
+	}
+	return ""
+}
+
+func (m *Settings_ConsulConfiguration) GetKeyFile() string {
+	if m != nil {
+		return m.KeyFile
+	}
+	return ""
+}
+
+func (m *Settings_ConsulConfiguration) GetInsecureSkipVerify() *types.BoolValue {
+	if m != nil {
+		return m.InsecureSkipVerify
+	}
+	return nil
+}
+
+func (m *Settings_ConsulConfiguration) GetWaitTime() *types.Duration {
+	if m != nil {
+		return m.WaitTime
+	}
+	return nil
+}
+
+func (m *Settings_ConsulConfiguration) GetServiceDiscovery() *Settings_ConsulConfiguration_ServiceDiscoveryOptions {
+	if m != nil {
+		return m.ServiceDiscovery
+	}
+	return nil
+}
+
+// service discovery options for Consul
+type Settings_ConsulConfiguration_ServiceDiscoveryOptions struct {
+	// Use this parameter to restrict the data centers that will be considered when discovering and routing to
+	// services. If not provided, Gloo will use all available data centers.
+	DataCenters          []string `protobuf:"bytes,1,rep,name=data_centers,json=dataCenters,proto3" json:"data_centers,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *Settings_ConsulConfiguration_ServiceDiscoveryOptions) Reset() {
+	*m = Settings_ConsulConfiguration_ServiceDiscoveryOptions{}
+}
+func (m *Settings_ConsulConfiguration_ServiceDiscoveryOptions) String() string {
+	return proto.CompactTextString(m)
+}
+func (*Settings_ConsulConfiguration_ServiceDiscoveryOptions) ProtoMessage() {}
+func (*Settings_ConsulConfiguration_ServiceDiscoveryOptions) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bd7533c2495e1752, []int{0, 8, 0}
+}
+func (m *Settings_ConsulConfiguration_ServiceDiscoveryOptions) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_Settings_ConsulConfiguration_ServiceDiscoveryOptions.Unmarshal(m, b)
+}
+func (m *Settings_ConsulConfiguration_ServiceDiscoveryOptions) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_Settings_ConsulConfiguration_ServiceDiscoveryOptions.Marshal(b, m, deterministic)
+}
+func (m *Settings_ConsulConfiguration_ServiceDiscoveryOptions) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Settings_ConsulConfiguration_ServiceDiscoveryOptions.Merge(m, src)
+}
+func (m *Settings_ConsulConfiguration_ServiceDiscoveryOptions) XXX_Size() int {
+	return xxx_messageInfo_Settings_ConsulConfiguration_ServiceDiscoveryOptions.Size(m)
+}
+func (m *Settings_ConsulConfiguration_ServiceDiscoveryOptions) XXX_DiscardUnknown() {
+	xxx_messageInfo_Settings_ConsulConfiguration_ServiceDiscoveryOptions.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_Settings_ConsulConfiguration_ServiceDiscoveryOptions proto.InternalMessageInfo
+
+func (m *Settings_ConsulConfiguration_ServiceDiscoveryOptions) GetDataCenters() []string {
+	if m != nil {
+		return m.DataCenters
+	}
+	return nil
+}
+
+// Provides overrides for the default configuration parameters used to interact with Kubernetes.
+type Settings_KubernetesConfiguration struct {
+	// Rate limits for the kubernetes clients
+	RateLimits           *Settings_KubernetesConfiguration_RateLimits `protobuf:"bytes,1,opt,name=rate_limits,json=rateLimits,proto3" json:"rate_limits,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}                                     `json:"-"`
+	XXX_unrecognized     []byte                                       `json:"-"`
+	XXX_sizecache        int32                                        `json:"-"`
+}
+
+func (m *Settings_KubernetesConfiguration) Reset()         { *m = Settings_KubernetesConfiguration{} }
+func (m *Settings_KubernetesConfiguration) String() string { return proto.CompactTextString(m) }
+func (*Settings_KubernetesConfiguration) ProtoMessage()    {}
+func (*Settings_KubernetesConfiguration) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bd7533c2495e1752, []int{0, 9}
+}
+func (m *Settings_KubernetesConfiguration) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_Settings_KubernetesConfiguration.Unmarshal(m, b)
+}
+func (m *Settings_KubernetesConfiguration) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_Settings_KubernetesConfiguration.Marshal(b, m, deterministic)
+}
+func (m *Settings_KubernetesConfiguration) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Settings_KubernetesConfiguration.Merge(m, src)
+}
+func (m *Settings_KubernetesConfiguration) XXX_Size() int {
+	return xxx_messageInfo_Settings_KubernetesConfiguration.Size(m)
+}
+func (m *Settings_KubernetesConfiguration) XXX_DiscardUnknown() {
+	xxx_messageInfo_Settings_KubernetesConfiguration.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_Settings_KubernetesConfiguration proto.InternalMessageInfo
+
+func (m *Settings_KubernetesConfiguration) GetRateLimits() *Settings_KubernetesConfiguration_RateLimits {
+	if m != nil {
+		return m.RateLimits
+	}
+	return nil
+}
+
+type Settings_KubernetesConfiguration_RateLimits struct {
+	// The maximum queries-per-second Gloo can make to the Kubernetes API Server.
+	QPS float32 `protobuf:"fixed32,1,opt,name=QPS,proto3" json:"QPS,omitempty"`
+	// Maximum burst for throttle. When a steady state of QPS requests per second,
+	// this is an additional number of allowed, to allow for short bursts.
+	Burst                uint32   `protobuf:"varint,2,opt,name=burst,proto3" json:"burst,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *Settings_KubernetesConfiguration_RateLimits) Reset() {
+	*m = Settings_KubernetesConfiguration_RateLimits{}
+}
+func (m *Settings_KubernetesConfiguration_RateLimits) String() string {
+	return proto.CompactTextString(m)
+}
+func (*Settings_KubernetesConfiguration_RateLimits) ProtoMessage() {}
+func (*Settings_KubernetesConfiguration_RateLimits) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bd7533c2495e1752, []int{0, 9, 0}
+}
+func (m *Settings_KubernetesConfiguration_RateLimits) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_Settings_KubernetesConfiguration_RateLimits.Unmarshal(m, b)
+}
+func (m *Settings_KubernetesConfiguration_RateLimits) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_Settings_KubernetesConfiguration_RateLimits.Marshal(b, m, deterministic)
+}
+func (m *Settings_KubernetesConfiguration_RateLimits) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Settings_KubernetesConfiguration_RateLimits.Merge(m, src)
+}
+func (m *Settings_KubernetesConfiguration_RateLimits) XXX_Size() int {
+	return xxx_messageInfo_Settings_KubernetesConfiguration_RateLimits.Size(m)
+}
+func (m *Settings_KubernetesConfiguration_RateLimits) XXX_DiscardUnknown() {
+	xxx_messageInfo_Settings_KubernetesConfiguration_RateLimits.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_Settings_KubernetesConfiguration_RateLimits proto.InternalMessageInfo
+
+func (m *Settings_KubernetesConfiguration_RateLimits) GetQPS() float32 {
+	if m != nil {
+		return m.QPS
+	}
+	return 0
+}
+
+func (m *Settings_KubernetesConfiguration_RateLimits) GetBurst() uint32 {
+	if m != nil {
+		return m.Burst
+	}
+	return 0
+}
+
+// Settings specific to the gloo (Envoy xDS server) controller
+type GlooOptions struct {
+	// Where the `gloo` xDS server should bind (should not need configuration by user). Defaults to `0.0.0.0:9977`
+	XdsBindAddr string `protobuf:"bytes,1,opt,name=xds_bind_addr,json=xdsBindAddr,proto3" json:"xds_bind_addr,omitempty"`
+	// Where the `gloo` validation server should bind. Defaults to `0.0.0.0:9988`
+	ValidationBindAddr string `protobuf:"bytes,2,opt,name=validation_bind_addr,json=validationBindAddr,proto3" json:"validation_bind_addr,omitempty"`
+	// Default circuit breaker configuration to use for upstream requests,
+	// when not provided by specific upstream.
+	CircuitBreakers *CircuitBreakerConfig `protobuf:"bytes,3,opt,name=circuit_breakers,json=circuitBreakers,proto3" json:"circuit_breakers,omitempty"`
+	// Timeout to get initial snapshot of resources. If not set, Gloo will not wait for initial
+	// snapshot - if set and and gloo could not fetch it's initial snapshot before the timeout
+	// reached, gloo will panic.
+	EndpointsWarmingTimeout *types.Duration         `protobuf:"bytes,4,opt,name=endpoints_warming_timeout,json=endpointsWarmingTimeout,proto3" json:"endpoints_warming_timeout,omitempty"`
+	AwsOptions              *GlooOptions_AWSOptions `protobuf:"bytes,5,opt,name=aws_options,json=awsOptions,proto3" json:"aws_options,omitempty"`
+	// Gloo allows you to directly reference a Kubernetes service as a routing destination. To enable this feature,
+	// Gloo scans the cluster for Kubernetes services and creates a special type of in-memory Upstream to represent them.
+	// If the cluster contains a lot of services and you do not restrict the namespaces Gloo is watching, this can result
+	// in significant overhead. If you do not plan on using this feature, you can use this flag to turn it off.
+	DisableKubernetesDestinations bool     `protobuf:"varint,6,opt,name=disable_kubernetes_destinations,json=disableKubernetesDestinations,proto3" json:"disable_kubernetes_destinations,omitempty"`
+	XXX_NoUnkeyedLiteral          struct{} `json:"-"`
+	XXX_unrecognized              []byte   `json:"-"`
+	XXX_sizecache                 int32    `json:"-"`
+}
+
+func (m *GlooOptions) Reset()         { *m = GlooOptions{} }
+func (m *GlooOptions) String() string { return proto.CompactTextString(m) }
+func (*GlooOptions) ProtoMessage()    {}
+func (*GlooOptions) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bd7533c2495e1752, []int{1}
+}
+func (m *GlooOptions) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_GlooOptions.Unmarshal(m, b)
+}
+func (m *GlooOptions) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_GlooOptions.Marshal(b, m, deterministic)
+}
+func (m *GlooOptions) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_GlooOptions.Merge(m, src)
+}
+func (m *GlooOptions) XXX_Size() int {
+	return xxx_messageInfo_GlooOptions.Size(m)
+}
+func (m *GlooOptions) XXX_DiscardUnknown() {
+	xxx_messageInfo_GlooOptions.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_GlooOptions proto.InternalMessageInfo
+
+func (m *GlooOptions) GetXdsBindAddr() string {
+	if m != nil {
+		return m.XdsBindAddr
+	}
+	return ""
+}
+
+func (m *GlooOptions) GetValidationBindAddr() string {
+	if m != nil {
+		return m.ValidationBindAddr
+	}
+	return ""
+}
+
+func (m *GlooOptions) GetCircuitBreakers() *CircuitBreakerConfig {
+	if m != nil {
+		return m.CircuitBreakers
+	}
+	return nil
+}
+
+func (m *GlooOptions) GetEndpointsWarmingTimeout() *types.Duration {
+	if m != nil {
+		return m.EndpointsWarmingTimeout
+	}
+	return nil
+}
+
+func (m *GlooOptions) GetAwsOptions() *GlooOptions_AWSOptions {
+	if m != nil {
+		return m.AwsOptions
+	}
+	return nil
+}
+
+func (m *GlooOptions) GetDisableKubernetesDestinations() bool {
+	if m != nil {
+		return m.DisableKubernetesDestinations
+	}
+	return false
+}
+
+type GlooOptions_AWSOptions struct {
+	// Enable credential discovery via IAM; when this is set, there's no need provide a secret
+	// on the upstream when running on AWS environment.
+	//
+	// Note: This should **ONLY** be enabled when running in an AWS environment, as the AWS
+	// code blocks the envoy main thread. This should be negligible when running inside AWS.
+	EnableCredentialsDiscovey bool     `protobuf:"varint,1,opt,name=enable_credentials_discovey,json=enableCredentialsDiscovey,proto3" json:"enable_credentials_discovey,omitempty"`
+	XXX_NoUnkeyedLiteral      struct{} `json:"-"`
+	XXX_unrecognized          []byte   `json:"-"`
+	XXX_sizecache             int32    `json:"-"`
+}
+
+func (m *GlooOptions_AWSOptions) Reset()         { *m = GlooOptions_AWSOptions{} }
+func (m *GlooOptions_AWSOptions) String() string { return proto.CompactTextString(m) }
+func (*GlooOptions_AWSOptions) ProtoMessage()    {}
+func (*GlooOptions_AWSOptions) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bd7533c2495e1752, []int{1, 0}
+}
+func (m *GlooOptions_AWSOptions) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_GlooOptions_AWSOptions.Unmarshal(m, b)
+}
+func (m *GlooOptions_AWSOptions) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_GlooOptions_AWSOptions.Marshal(b, m, deterministic)
+}
+func (m *GlooOptions_AWSOptions) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_GlooOptions_AWSOptions.Merge(m, src)
+}
+func (m *GlooOptions_AWSOptions) XXX_Size() int {
+	return xxx_messageInfo_GlooOptions_AWSOptions.Size(m)
+}
+func (m *GlooOptions_AWSOptions) XXX_DiscardUnknown() {
+	xxx_messageInfo_GlooOptions_AWSOptions.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_GlooOptions_AWSOptions proto.InternalMessageInfo
+
+func (m *GlooOptions_AWSOptions) GetEnableCredentialsDiscovey() bool {
+	if m != nil {
+		return m.EnableCredentialsDiscovey
+	}
+	return false
+}
+
+// Settings specific to the Gateway controller
+type GatewayOptions struct {
+	// Address of the `gloo` config validation server. Defaults to `gloo:9988`
+	ValidationServerAddr string `protobuf:"bytes,1,opt,name=validation_server_addr,json=validationServerAddr,proto3" json:"validation_server_addr,omitempty"`
+	// Disable auto generation of default gateways from gateway pod
+	DisableAutoGenGateways bool `protobuf:"varint,2,opt,name=disable_auto_gen_gateways,json=disableAutoGenGateways,proto3" json:"disable_auto_gen_gateways,omitempty"`
+	// if provided, the Gateway will perform[Dynamic Admission Control](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/)
+	// of Gateways, Virtual Services, and Route Tables when running in Kubernetes.
+	Validation           *GatewayOptions_ValidationOptions `protobuf:"bytes,3,opt,name=validation,proto3" json:"validation,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}                          `json:"-"`
+	XXX_unrecognized     []byte                            `json:"-"`
+	XXX_sizecache        int32                             `json:"-"`
+}
+
+func (m *GatewayOptions) Reset()         { *m = GatewayOptions{} }
+func (m *GatewayOptions) String() string { return proto.CompactTextString(m) }
+func (*GatewayOptions) ProtoMessage()    {}
+func (*GatewayOptions) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bd7533c2495e1752, []int{2}
+}
+func (m *GatewayOptions) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_GatewayOptions.Unmarshal(m, b)
+}
+func (m *GatewayOptions) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_GatewayOptions.Marshal(b, m, deterministic)
+}
+func (m *GatewayOptions) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_GatewayOptions.Merge(m, src)
+}
+func (m *GatewayOptions) XXX_Size() int {
+	return xxx_messageInfo_GatewayOptions.Size(m)
+}
+func (m *GatewayOptions) XXX_DiscardUnknown() {
+	xxx_messageInfo_GatewayOptions.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_GatewayOptions proto.InternalMessageInfo
+
+func (m *GatewayOptions) GetValidationServerAddr() string {
+	if m != nil {
+		return m.ValidationServerAddr
+	}
+	return ""
+}
+
+func (m *GatewayOptions) GetDisableAutoGenGateways() bool {
+	if m != nil {
+		return m.DisableAutoGenGateways
+	}
+	return false
+}
+
+func (m *GatewayOptions) GetValidation() *GatewayOptions_ValidationOptions {
+	if m != nil {
+		return m.Validation
+	}
+	return nil
+}
+
+// options for configuring admission control / validation
+type GatewayOptions_ValidationOptions struct {
+	// Address of the `gloo` proxy validation grpc server. Defaults to `gloo:9988`
+	// This field is required in order to enable fine-grained admission control
+	ProxyValidationServerAddr string `protobuf:"bytes,2,opt,name=proxy_validation_server_addr,json=proxyValidationServerAddr,proto3" json:"proxy_validation_server_addr,omitempty"`
+	// Path to TLS Certificate for Kubernetes Validating webhook. Defaults to `/etc/gateway/validation-certs/tls.crt`
+	ValidationWebhookTlsCert string `protobuf:"bytes,3,opt,name=validation_webhook_tls_cert,json=validationWebhookTlsCert,proto3" json:"validation_webhook_tls_cert,omitempty"`
+	// Path to TLS Private Key for Kubernetes Validating webhook. Defaults to `/etc/gateway/validation-certs/tls.key`
+	ValidationWebhookTlsKey string `protobuf:"bytes,4,opt,name=validation_webhook_tls_key,json=validationWebhookTlsKey,proto3" json:"validation_webhook_tls_key,omitempty"`
+	// When Gateway cannot communicate with Gloo (e.g. Gloo is offline)
+	// resources will be rejected by default.
+	// Enable the `ignoreGlooValidationFailure` to prevent the Validation server from rejecting
+	// resources due to network errors
+	IgnoreGlooValidationFailure bool `protobuf:"varint,5,opt,name=ignore_gloo_validation_failure,json=ignoreGlooValidationFailure,proto3" json:"ignore_gloo_validation_failure,omitempty"`
+	// Always accept resources even if validation produced an error
+	// Validation will still log the error and increment the validation.gateway.solo.io/resources_rejected stat
+	// Currently defaults to true - must be set to `false` to prevent writing invalid resources to storage
+	AlwaysAccept         *types.BoolValue `protobuf:"bytes,6,opt,name=always_accept,json=alwaysAccept,proto3" json:"always_accept,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}         `json:"-"`
+	XXX_unrecognized     []byte           `json:"-"`
+	XXX_sizecache        int32            `json:"-"`
+}
+
+func (m *GatewayOptions_ValidationOptions) Reset()         { *m = GatewayOptions_ValidationOptions{} }
+func (m *GatewayOptions_ValidationOptions) String() string { return proto.CompactTextString(m) }
+func (*GatewayOptions_ValidationOptions) ProtoMessage()    {}
+func (*GatewayOptions_ValidationOptions) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bd7533c2495e1752, []int{2, 0}
+}
+func (m *GatewayOptions_ValidationOptions) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_GatewayOptions_ValidationOptions.Unmarshal(m, b)
+}
+func (m *GatewayOptions_ValidationOptions) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_GatewayOptions_ValidationOptions.Marshal(b, m, deterministic)
+}
+func (m *GatewayOptions_ValidationOptions) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_GatewayOptions_ValidationOptions.Merge(m, src)
+}
+func (m *GatewayOptions_ValidationOptions) XXX_Size() int {
+	return xxx_messageInfo_GatewayOptions_ValidationOptions.Size(m)
+}
+func (m *GatewayOptions_ValidationOptions) XXX_DiscardUnknown() {
+	xxx_messageInfo_GatewayOptions_ValidationOptions.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_GatewayOptions_ValidationOptions proto.InternalMessageInfo
+
+func (m *GatewayOptions_ValidationOptions) GetProxyValidationServerAddr() string {
+	if m != nil {
+		return m.ProxyValidationServerAddr
+	}
+	return ""
+}
+
+func (m *GatewayOptions_ValidationOptions) GetValidationWebhookTlsCert() string {
+	if m != nil {
+		return m.ValidationWebhookTlsCert
+	}
+	return ""
+}
+
+func (m *GatewayOptions_ValidationOptions) GetValidationWebhookTlsKey() string {
+	if m != nil {
+		return m.ValidationWebhookTlsKey
+	}
+	return ""
+}
+
+func (m *GatewayOptions_ValidationOptions) GetIgnoreGlooValidationFailure() bool {
+	if m != nil {
+		return m.IgnoreGlooValidationFailure
+	}
+	return false
+}
+
+func (m *GatewayOptions_ValidationOptions) GetAlwaysAccept() *types.BoolValue {
+	if m != nil {
+		return m.AlwaysAccept
+	}
+	return nil
+}
+
 func init() {
+	proto.RegisterEnum("gloo.solo.io.Settings_DiscoveryOptions_FdsMode", Settings_DiscoveryOptions_FdsMode_name, Settings_DiscoveryOptions_FdsMode_value)
 	proto.RegisterType((*Settings)(nil), "gloo.solo.io.Settings")
 	proto.RegisterType((*Settings_KubernetesCrds)(nil), "gloo.solo.io.Settings.KubernetesCrds")
 	proto.RegisterType((*Settings_KubernetesSecrets)(nil), "gloo.solo.io.Settings.KubernetesSecrets")
 	proto.RegisterType((*Settings_VaultSecrets)(nil), "gloo.solo.io.Settings.VaultSecrets")
+	proto.RegisterType((*Settings_ConsulKv)(nil), "gloo.solo.io.Settings.ConsulKv")
 	proto.RegisterType((*Settings_KubernetesConfigmaps)(nil), "gloo.solo.io.Settings.KubernetesConfigmaps")
 	proto.RegisterType((*Settings_Directory)(nil), "gloo.solo.io.Settings.Directory")
+	proto.RegisterType((*Settings_KnativeOptions)(nil), "gloo.solo.io.Settings.KnativeOptions")
+	proto.RegisterType((*Settings_DiscoveryOptions)(nil), "gloo.solo.io.Settings.DiscoveryOptions")
+	proto.RegisterType((*Settings_ConsulConfiguration)(nil), "gloo.solo.io.Settings.ConsulConfiguration")
+	proto.RegisterType((*Settings_ConsulConfiguration_ServiceDiscoveryOptions)(nil), "gloo.solo.io.Settings.ConsulConfiguration.ServiceDiscoveryOptions")
+	proto.RegisterType((*Settings_KubernetesConfiguration)(nil), "gloo.solo.io.Settings.KubernetesConfiguration")
+	proto.RegisterType((*Settings_KubernetesConfiguration_RateLimits)(nil), "gloo.solo.io.Settings.KubernetesConfiguration.RateLimits")
+	proto.RegisterType((*GlooOptions)(nil), "gloo.solo.io.GlooOptions")
+	proto.RegisterType((*GlooOptions_AWSOptions)(nil), "gloo.solo.io.GlooOptions.AWSOptions")
+	proto.RegisterType((*GatewayOptions)(nil), "gloo.solo.io.GatewayOptions")
+	proto.RegisterType((*GatewayOptions_ValidationOptions)(nil), "gloo.solo.io.GatewayOptions.ValidationOptions")
 }
 
 func init() {
@@ -647,53 +1450,132 @@ func init() {
 }
 
 var fileDescriptor_bd7533c2495e1752 = []byte{
-	// 730 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x94, 0x54, 0xdd, 0x4e, 0x13, 0x41,
-	0x14, 0xa6, 0x80, 0xd0, 0x0e, 0x85, 0xb6, 0x0b, 0xe2, 0x76, 0x35, 0xd0, 0xd4, 0x98, 0x94, 0x18,
-	0x77, 0x45, 0x13, 0x43, 0xfc, 0xb9, 0xa0, 0x60, 0x6c, 0x62, 0xf0, 0x62, 0x1b, 0xbd, 0xe0, 0xc2,
-	0x66, 0xba, 0x73, 0xba, 0x8c, 0x6d, 0x77, 0x9a, 0x99, 0xd9, 0x2a, 0x6f, 0xe4, 0xa3, 0xf8, 0x04,
-	0x5e, 0x72, 0xe1, 0x23, 0xf8, 0x04, 0xa6, 0xb3, 0xb3, 0x7f, 0x15, 0x42, 0xb9, 0x6a, 0xe7, 0x9c,
-	0xf3, 0x7d, 0xdf, 0xcc, 0xb7, 0xe7, 0x1c, 0xf4, 0xc6, 0xa7, 0xf2, 0x22, 0xec, 0xdb, 0x1e, 0x1b,
-	0x3b, 0x82, 0x8d, 0xd8, 0x33, 0xca, 0x1c, 0x7f, 0xc4, 0x98, 0x33, 0xe1, 0xec, 0x1b, 0x78, 0x52,
-	0x44, 0x27, 0x3c, 0xa1, 0xce, 0xf4, 0xd0, 0x11, 0x20, 0x25, 0x0d, 0x7c, 0x61, 0x4f, 0x38, 0x93,
-	0xcc, 0x28, 0xcf, 0x72, 0xf6, 0x0c, 0x66, 0x53, 0x66, 0xed, 0xf8, 0xcc, 0x67, 0x2a, 0xe1, 0xcc,
-	0xfe, 0x45, 0x35, 0xd6, 0xe1, 0x35, 0x02, 0xea, 0x77, 0x48, 0x65, 0x4c, 0x3b, 0x06, 0x89, 0x09,
-	0x96, 0x58, 0x43, 0x9c, 0x05, 0x20, 0x42, 0x62, 0x19, 0xea, 0x7b, 0x58, 0xef, 0xee, 0xf4, 0x08,
-	0xf8, 0x21, 0x21, 0x10, 0x94, 0x05, 0x31, 0xbc, 0x7d, 0x27, 0xb8, 0x47, 0xb9, 0x17, 0x52, 0xd9,
-	0xeb, 0x73, 0xc0, 0x43, 0xe0, 0x9a, 0x63, 0xcf, 0x67, 0xcc, 0x1f, 0x81, 0xa3, 0x4e, 0xfd, 0x70,
-	0xe0, 0x90, 0x90, 0x63, 0x49, 0x59, 0x10, 0xe5, 0x9b, 0xbf, 0x11, 0x2a, 0x76, 0xb5, 0x7b, 0x86,
-	0x83, 0xb6, 0x09, 0x15, 0x1e, 0x9b, 0x02, 0xbf, 0xec, 0x05, 0x78, 0x0c, 0x62, 0x82, 0x3d, 0x30,
-	0x0b, 0x8d, 0x42, 0xab, 0xe4, 0x1a, 0x49, 0xea, 0x53, 0x9c, 0x31, 0x0e, 0x50, 0xf5, 0x3b, 0x96,
-	0xde, 0x45, 0x5a, 0x2c, 0xcc, 0xe5, 0xc6, 0x4a, 0xab, 0xe4, 0x56, 0x54, 0x3c, 0xa9, 0x14, 0x06,
-	0x46, 0xe6, 0x30, 0xec, 0x03, 0x0f, 0x40, 0x82, 0xe8, 0x79, 0x2c, 0x18, 0x50, 0xbf, 0x27, 0x58,
-	0xc8, 0x3d, 0x30, 0x57, 0x1b, 0x85, 0xd6, 0xc6, 0x8b, 0x27, 0x76, 0xf6, 0xb3, 0xd9, 0xf1, 0xad,
-	0xec, 0x8f, 0x09, 0xec, 0x84, 0x13, 0xd1, 0x59, 0x72, 0x77, 0x53, 0xa2, 0x13, 0xc5, 0xd3, 0x55,
-	0x34, 0xc6, 0x39, 0x7a, 0x40, 0x28, 0x07, 0x4f, 0x32, 0x7e, 0x39, 0xa7, 0x70, 0x4f, 0x29, 0x34,
-	0x6e, 0x50, 0x38, 0x8d, 0x51, 0x9d, 0x25, 0xf7, 0x7e, 0x42, 0x91, 0xe3, 0x26, 0xb9, 0xeb, 0x0b,
-	0xf0, 0x38, 0xc8, 0x98, 0x7c, 0x4d, 0x91, 0xb7, 0x6e, 0xbd, 0x7e, 0x57, 0xa1, 0x44, 0xa7, 0x90,
-	0x7d, 0x41, 0x14, 0xd4, 0x2a, 0x9f, 0xd1, 0xf6, 0x14, 0x87, 0x23, 0x39, 0x27, 0xb0, 0xae, 0x04,
-	0x1e, 0xdf, 0x20, 0xf0, 0x65, 0x86, 0x48, 0xb9, 0x6b, 0xd3, 0xf4, 0x7c, 0x9d, 0x31, 0x79, 0xea,
-	0xe2, 0x82, 0xc6, 0x14, 0x32, 0xc6, 0xe4, 0xb8, 0x87, 0xc8, 0xca, 0x18, 0x83, 0xb9, 0xa4, 0x03,
-	0xec, 0x25, 0xf4, 0x25, 0x45, 0xff, 0xf4, 0xf6, 0x2f, 0xab, 0xbc, 0x1e, 0xe3, 0x89, 0xe8, 0x2c,
-	0xbb, 0x19, 0xa7, 0x8f, 0x35, 0x9f, 0x16, 0xfb, 0x8a, 0xea, 0xe9, 0x43, 0xe6, 0xb5, 0xd0, 0x82,
-	0x4f, 0x59, 0x76, 0x53, 0x37, 0xe6, 0xf8, 0x1f, 0xa2, 0x52, 0x9f, 0x06, 0xa4, 0x87, 0x09, 0xe1,
-	0xe6, 0x86, 0x6a, 0xfb, 0xe2, 0x2c, 0x70, 0x4c, 0x08, 0x37, 0xde, 0xa2, 0x32, 0x87, 0x01, 0x07,
-	0x71, 0xd1, 0xe3, 0x58, 0x82, 0x59, 0x56, 0x7a, 0x75, 0x3b, 0x9a, 0x30, 0x3b, 0x9e, 0x30, 0xfb,
-	0x54, 0x4f, 0x98, 0xbb, 0xa1, 0xcb, 0x5d, 0x2c, 0xc1, 0xa8, 0xa3, 0x22, 0x81, 0x69, 0x6f, 0xcc,
-	0x08, 0x98, 0x9b, 0x8d, 0x42, 0xab, 0xe8, 0xae, 0x13, 0x98, 0x9e, 0x31, 0x02, 0x86, 0x89, 0xd6,
-	0x47, 0x34, 0x18, 0x02, 0x27, 0x66, 0x2d, 0xca, 0xe8, 0xa3, 0x71, 0x86, 0xaa, 0x73, 0x63, 0x2d,
-	0xcc, 0x15, 0x25, 0xdb, 0xcc, 0x3f, 0xf3, 0x24, 0xaa, 0x6a, 0x47, 0x45, 0x91, 0x9b, 0x6e, 0xc5,
-	0xcb, 0x45, 0x85, 0x71, 0x84, 0x50, 0xba, 0x64, 0xcc, 0xaa, 0x22, 0x32, 0xf3, 0x44, 0xef, 0x93,
-	0xbc, 0x9b, 0xa9, 0x35, 0x8e, 0x50, 0x31, 0x5e, 0x86, 0xe6, 0x96, 0xc2, 0xed, 0xda, 0x1e, 0xe3,
-	0x90, 0xe0, 0xce, 0x74, 0xb6, 0xbd, 0xfa, 0xeb, 0x6a, 0x7f, 0xc9, 0x4d, 0xaa, 0x8d, 0x0f, 0x68,
-	0x2d, 0xda, 0x89, 0x66, 0x45, 0xe1, 0x76, 0xf2, 0xb8, 0xae, 0xca, 0xb5, 0xeb, 0x33, 0xd4, 0xdf,
-	0xab, 0xfd, 0x9a, 0x04, 0x21, 0x09, 0x1d, 0x0c, 0x5e, 0x37, 0xa9, 0x1f, 0x30, 0x0e, 0x4d, 0x57,
-	0xc3, 0xad, 0x2a, 0xda, 0xca, 0x6f, 0x02, 0x6b, 0x1b, 0xd5, 0xfe, 0x1b, 0x2e, 0x6b, 0x0b, 0x95,
-	0xb3, 0x03, 0x61, 0xed, 0xa2, 0x9d, 0xeb, 0xda, 0xcc, 0x3a, 0x40, 0xa5, 0xa4, 0x25, 0x8c, 0x47,
-	0xa8, 0x94, 0xb4, 0x84, 0x5e, 0x77, 0x69, 0xa0, 0x5d, 0x41, 0x9b, 0xb9, 0x6d, 0x32, 0x0b, 0xe4,
-	0xa6, 0xa8, 0x5d, 0x43, 0x95, 0xb9, 0x6e, 0x6c, 0xbf, 0xfa, 0xf9, 0x67, 0xaf, 0x70, 0xfe, 0x7c,
-	0xb1, 0x15, 0x3e, 0x19, 0xfa, 0x7a, 0x8d, 0xf7, 0xd7, 0x54, 0x1f, 0xbd, 0xfc, 0x17, 0x00, 0x00,
-	0xff, 0xff, 0x11, 0x20, 0xf6, 0xfb, 0x01, 0x07, 0x00, 0x00,
+	// 1996 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xa4, 0x58, 0xdd, 0x72, 0x1b, 0xb7,
+	0x15, 0x36, 0x65, 0x59, 0x24, 0x0f, 0xf5, 0x43, 0xc1, 0x8a, 0xb4, 0x5c, 0xd9, 0x96, 0xa3, 0x36,
+	0xad, 0xd3, 0x4e, 0xc8, 0xc4, 0x4d, 0xdd, 0x26, 0x76, 0xea, 0x11, 0x69, 0xd9, 0x72, 0x25, 0x27,
+	0xce, 0xd2, 0xb1, 0x5b, 0x4f, 0xa7, 0x3b, 0xe0, 0x2e, 0x48, 0xa1, 0x5c, 0x2e, 0x38, 0x00, 0x48,
+	0x99, 0xb7, 0x79, 0x87, 0xbe, 0x43, 0xa7, 0x79, 0x85, 0x3e, 0x40, 0x9f, 0xa0, 0x77, 0xcd, 0x45,
+	0x2f, 0x7a, 0xd5, 0x9b, 0xf4, 0x09, 0x32, 0xf8, 0xd9, 0x1f, 0x52, 0xa2, 0x2c, 0x8d, 0x6f, 0xa4,
+	0x05, 0xce, 0xf9, 0xbe, 0xb3, 0x38, 0x38, 0x7f, 0x4b, 0xb8, 0xdf, 0xa3, 0xf2, 0x78, 0xd4, 0xa9,
+	0x07, 0x6c, 0xd0, 0x10, 0x2c, 0x62, 0x1f, 0x51, 0xd6, 0xe8, 0x45, 0x8c, 0x35, 0x86, 0x9c, 0xfd,
+	0x85, 0x04, 0x52, 0x98, 0x15, 0x1e, 0xd2, 0xc6, 0xf8, 0x93, 0x86, 0x20, 0x52, 0xd2, 0xb8, 0x27,
+	0xea, 0x43, 0xce, 0x24, 0x43, 0xcb, 0x4a, 0x56, 0x57, 0xb0, 0x3a, 0x65, 0xee, 0x46, 0x8f, 0xf5,
+	0x98, 0x16, 0x34, 0xd4, 0x93, 0xd1, 0x71, 0x3f, 0x39, 0xc3, 0x80, 0xfe, 0xdf, 0xa7, 0x32, 0xa1,
+	0x1d, 0x10, 0x89, 0x43, 0x2c, 0xb1, 0x85, 0x34, 0x2e, 0x00, 0x11, 0x12, 0xcb, 0x91, 0xb8, 0x84,
+	0x8d, 0x64, 0x6d, 0x21, 0x5f, 0x5c, 0xea, 0xdc, 0xe4, 0x8d, 0x24, 0xb1, 0xa0, 0x2c, 0x4e, 0x2c,
+	0xfe, 0xf1, 0x72, 0xf0, 0x58, 0x12, 0x3e, 0xe4, 0x54, 0x90, 0xc6, 0x30, 0x1a, 0xf5, 0x68, 0x2c,
+	0x1a, 0x1c, 0x4b, 0x12, 0xd1, 0x01, 0x95, 0xd9, 0x93, 0xa5, 0xfe, 0xc3, 0xbb, 0x52, 0x93, 0x37,
+	0x12, 0x8f, 0xe4, 0xb1, 0x7d, 0x6f, 0xf5, 0x68, 0x99, 0xbf, 0x7a, 0xe7, 0x97, 0xee, 0xe0, 0x40,
+	0xff, 0xb1, 0x84, 0xcd, 0x4b, 0x11, 0x06, 0x94, 0x07, 0x23, 0x2a, 0xfd, 0x0e, 0x27, 0xb8, 0x4f,
+	0xb8, 0xe5, 0xb8, 0xd5, 0x63, 0xac, 0x17, 0x91, 0x86, 0x5e, 0x75, 0x46, 0xdd, 0x46, 0x38, 0xe2,
+	0x58, 0x52, 0x16, 0xcf, 0x93, 0x9f, 0x70, 0x3c, 0x1c, 0x12, 0x6e, 0x6f, 0x62, 0xf7, 0x7f, 0x37,
+	0xa0, 0xd4, 0xb6, 0x61, 0x89, 0x1a, 0x70, 0x3d, 0xa4, 0x22, 0x60, 0x63, 0xc2, 0x27, 0x7e, 0x8c,
+	0x07, 0x44, 0x0c, 0x71, 0x40, 0x9c, 0xc2, 0xed, 0xc2, 0x9d, 0xb2, 0x87, 0x52, 0xd1, 0x97, 0x89,
+	0x04, 0x7d, 0x08, 0xd5, 0x13, 0x2c, 0x83, 0xe3, 0x4c, 0x59, 0x38, 0x0b, 0xb7, 0xaf, 0xde, 0x29,
+	0x7b, 0x6b, 0x7a, 0x3f, 0xd5, 0x14, 0x08, 0x83, 0xd3, 0x1f, 0x75, 0x08, 0x8f, 0x89, 0x24, 0xc2,
+	0x0f, 0x58, 0xdc, 0xa5, 0x3d, 0x5f, 0xb0, 0x11, 0x0f, 0x88, 0xb3, 0x78, 0xbb, 0x70, 0xa7, 0x72,
+	0xf7, 0x83, 0x7a, 0x3e, 0x1f, 0xea, 0xc9, 0x5b, 0xd5, 0x0f, 0x53, 0x58, 0x8b, 0x87, 0xe2, 0xe0,
+	0x8a, 0xb7, 0x99, 0x11, 0xb5, 0x34, 0x4f, 0x5b, 0xd3, 0xa0, 0xd7, 0xb0, 0x15, 0x52, 0x4e, 0x02,
+	0xc9, 0xf8, 0x64, 0xc6, 0xc2, 0x35, 0x6d, 0xe1, 0xf6, 0x1c, 0x0b, 0x8f, 0x12, 0xd4, 0xc1, 0x15,
+	0xef, 0xbd, 0x94, 0x62, 0x8a, 0xfb, 0x10, 0xaa, 0x01, 0x8b, 0xc5, 0x28, 0xf2, 0xfb, 0xe3, 0x84,
+	0xf4, 0x3d, 0x4d, 0xba, 0x33, 0x87, 0xb4, 0xa5, 0xd5, 0x0f, 0xc7, 0x07, 0x57, 0xbc, 0xd5, 0xc0,
+	0x3e, 0x5b, 0xb2, 0x70, 0xca, 0x17, 0x82, 0x04, 0x9c, 0xc8, 0x84, 0x74, 0x49, 0x93, 0xde, 0x79,
+	0xab, 0x2f, 0xda, 0x1a, 0x25, 0x0e, 0x0a, 0x79, 0x77, 0x98, 0x4d, 0x6b, 0xe5, 0x1b, 0xb8, 0x3e,
+	0xc6, 0xa3, 0x48, 0xce, 0x18, 0x28, 0x6a, 0x03, 0x3f, 0x99, 0x63, 0xe0, 0xa5, 0x42, 0x64, 0xdc,
+	0xeb, 0xe3, 0x6c, 0x7d, 0x96, 0x97, 0xa7, 0xa9, 0x4b, 0x17, 0xf4, 0x72, 0x21, 0xe7, 0xe5, 0x29,
+	0xee, 0x3e, 0xb8, 0x39, 0xc7, 0x60, 0x2e, 0x69, 0x17, 0x07, 0x29, 0x7d, 0x59, 0xd3, 0xff, 0xf2,
+	0xed, 0x61, 0xa2, 0x2f, 0x6e, 0x80, 0x87, 0xe2, 0x60, 0xc1, 0xcb, 0x79, 0x7a, 0xcf, 0xf2, 0x59,
+	0x63, 0x7f, 0x86, 0x5a, 0x76, 0x90, 0x59, 0x5b, 0x70, 0xc1, 0xa3, 0x2c, 0x78, 0x99, 0x37, 0x66,
+	0xf8, 0xff, 0x04, 0xb5, 0x2c, 0x64, 0x66, 0xf9, 0xb7, 0x2e, 0x16, 0x3b, 0x0b, 0xde, 0x66, 0x12,
+	0x3b, 0x33, 0xec, 0x3b, 0x50, 0xee, 0xd0, 0x38, 0xf4, 0x71, 0x18, 0x72, 0xa7, 0xa2, 0x32, 0xb4,
+	0xb9, 0xe0, 0x14, 0xbc, 0x92, 0xda, 0xdc, 0x0b, 0x43, 0x8e, 0x1e, 0xc0, 0x32, 0x27, 0x5d, 0x4e,
+	0xc4, 0xb1, 0xaf, 0x6a, 0xa4, 0xb3, 0xac, 0x2d, 0xd6, 0xea, 0xa6, 0x20, 0xd4, 0x93, 0x82, 0x50,
+	0x7f, 0x64, 0x0b, 0x86, 0x57, 0xb1, 0xea, 0x1e, 0x96, 0x04, 0xd5, 0xa0, 0x14, 0x92, 0xb1, 0x3f,
+	0x60, 0x21, 0x71, 0x56, 0x6e, 0x17, 0xee, 0x94, 0xbc, 0x62, 0x48, 0xc6, 0xcf, 0x58, 0x48, 0x90,
+	0x03, 0xc5, 0x88, 0xc6, 0x7d, 0xc2, 0x43, 0x67, 0xdd, 0x48, 0xec, 0x12, 0x7d, 0x0d, 0xd5, 0x99,
+	0x2a, 0x25, 0x9c, 0xab, 0xda, 0xec, 0xee, 0xf4, 0x41, 0x5b, 0x46, 0xab, 0x69, 0x94, 0xcc, 0x7d,
+	0xe9, 0xd7, 0x5f, 0x0b, 0xa6, 0x24, 0x02, 0x3d, 0x84, 0x62, 0x3f, 0xc6, 0x92, 0x8e, 0x89, 0x83,
+	0xce, 0xaf, 0x12, 0x46, 0xeb, 0xab, 0xa1, 0x3a, 0x8b, 0xf0, 0x12, 0x14, 0xda, 0x87, 0x72, 0x5a,
+	0xb8, 0x9c, 0xeb, 0x9a, 0xe2, 0xe7, 0x73, 0x6f, 0xd5, 0xea, 0x25, 0x24, 0x19, 0x12, 0x7d, 0x04,
+	0x8b, 0x0a, 0xe4, 0x38, 0x89, 0x17, 0xf3, 0x0c, 0x4f, 0x22, 0xc6, 0x12, 0x8c, 0x56, 0x43, 0xf7,
+	0xa0, 0xd8, 0xc3, 0x92, 0x9c, 0xe0, 0x89, 0x53, 0xd3, 0x88, 0x1b, 0x33, 0x08, 0x23, 0x4c, 0xdf,
+	0xd6, 0x2a, 0xa3, 0x26, 0x2c, 0x99, 0xfb, 0x76, 0x36, 0x34, 0xec, 0x17, 0xe7, 0x06, 0x88, 0x71,
+	0x5c, 0x72, 0x7f, 0x16, 0x89, 0xbe, 0x04, 0xc8, 0x62, 0xde, 0xd9, 0xd4, 0x3c, 0xf5, 0x0b, 0x26,
+	0x4d, 0xc2, 0x95, 0x63, 0x40, 0x0f, 0x00, 0xb2, 0x06, 0xee, 0x54, 0x35, 0x9f, 0x33, 0xcd, 0xb7,
+	0x9f, 0xca, 0xf5, 0x2d, 0xe6, 0xf4, 0xd1, 0x33, 0x28, 0xa7, 0x2d, 0xda, 0x71, 0x35, 0xb8, 0x51,
+	0xcf, 0x35, 0x6d, 0xd3, 0x1b, 0x67, 0x5f, 0x8f, 0x8f, 0x69, 0x40, 0x92, 0xb7, 0xf4, 0x32, 0x06,
+	0xd4, 0x86, 0x6a, 0xba, 0xf0, 0x05, 0xe1, 0x63, 0xc2, 0x9d, 0x6d, 0x5b, 0x32, 0xdf, 0xca, 0x6a,
+	0xe9, 0xd6, 0x52, 0xc5, 0xb6, 0x26, 0x40, 0xbf, 0x81, 0x45, 0xd5, 0x96, 0x9d, 0x1b, 0xb6, 0x34,
+	0x9a, 0x1e, 0x7d, 0x2e, 0x87, 0x06, 0xa0, 0xfb, 0x50, 0xb4, 0x33, 0x82, 0x73, 0x53, 0x63, 0xdf,
+	0xaf, 0x67, 0x7d, 0x7f, 0x0e, 0x32, 0x41, 0xa0, 0xdf, 0x42, 0x29, 0x99, 0xdc, 0x9c, 0x55, 0x8d,
+	0xde, 0xac, 0x07, 0x8c, 0x93, 0x14, 0xf2, 0xcc, 0x4a, 0x9b, 0x8b, 0xff, 0xfc, 0x7e, 0xe7, 0x8a,
+	0x97, 0x6a, 0xa3, 0x27, 0xb0, 0x64, 0x06, 0x38, 0x67, 0x4d, 0xe3, 0x36, 0xa6, 0x71, 0x6d, 0x2d,
+	0x6b, 0xd6, 0x14, 0xea, 0xff, 0xdf, 0xef, 0xac, 0x4b, 0x22, 0x64, 0x48, 0xbb, 0xdd, 0xcf, 0x77,
+	0x69, 0x2f, 0x66, 0x9c, 0xec, 0x7a, 0x16, 0xee, 0x56, 0x61, 0x75, 0xba, 0xbb, 0xba, 0xd7, 0x61,
+	0xfd, 0x54, 0x8f, 0x71, 0xbf, 0x5b, 0x80, 0xe5, 0x7c, 0x63, 0x40, 0x1b, 0x70, 0x4d, 0xb2, 0x3e,
+	0x89, 0xed, 0x68, 0x60, 0x16, 0xaa, 0x30, 0xa8, 0x6a, 0x44, 0x84, 0x1a, 0x02, 0xd4, 0x7e, 0xb2,
+	0x44, 0x5b, 0x50, 0x0c, 0xb0, 0x1f, 0x10, 0x2e, 0x75, 0x3d, 0x28, 0x7b, 0x4b, 0x01, 0x6e, 0x11,
+	0x2e, 0xad, 0x60, 0x88, 0xe5, 0xb1, 0x1e, 0x02, 0xb4, 0xe0, 0x39, 0x96, 0xc7, 0x68, 0x07, 0x2a,
+	0x41, 0x44, 0x49, 0x2c, 0x0d, 0xea, 0x9a, 0x16, 0x82, 0xd9, 0xd2, 0xc8, 0x9b, 0x60, 0x57, 0x7e,
+	0x9f, 0x4c, 0x74, 0xd7, 0x2c, 0x7b, 0x65, 0xb3, 0x73, 0x48, 0x26, 0xe8, 0x67, 0xb0, 0x26, 0x23,
+	0x61, 0x23, 0x44, 0x8f, 0x27, 0xba, 0xf1, 0x95, 0xbd, 0x15, 0x19, 0x09, 0x73, 0xed, 0x6a, 0x38,
+	0x41, 0xf7, 0xa0, 0x44, 0x63, 0x41, 0x82, 0x11, 0x4f, 0xda, 0x97, 0x7b, 0xaa, 0x42, 0x36, 0x19,
+	0x8b, 0x5e, 0xe2, 0x68, 0x44, 0xbc, 0x54, 0x57, 0xd5, 0x47, 0xce, 0x98, 0x31, 0x5e, 0x36, 0x87,
+	0x55, 0xeb, 0x43, 0x32, 0x71, 0x3f, 0x80, 0x52, 0x52, 0xbf, 0xa7, 0xd4, 0x0a, 0xd3, 0x6a, 0x9b,
+	0xb0, 0x71, 0x56, 0xcb, 0x72, 0x3f, 0x84, 0x72, 0xda, 0x5e, 0xd0, 0x0d, 0x55, 0xbd, 0xec, 0xc2,
+	0x12, 0x64, 0x1b, 0xee, 0xbf, 0x0b, 0xb0, 0x3a, 0x5d, 0xf7, 0xd0, 0x1e, 0xdc, 0x0c, 0xa2, 0x91,
+	0x90, 0x84, 0xfb, 0x34, 0xee, 0x29, 0xe7, 0xfb, 0x43, 0xce, 0xde, 0x4c, 0xfc, 0xe4, 0x66, 0x0c,
+	0x89, 0x6b, 0x95, 0x9e, 0x1a, 0x9d, 0xe7, 0x4a, 0x65, 0xcf, 0x5e, 0x56, 0x0b, 0x6e, 0xd9, 0xe2,
+	0xe9, 0xab, 0x3c, 0xe6, 0x31, 0x8e, 0x66, 0x38, 0xcc, 0xed, 0x6e, 0x5b, 0xad, 0x7d, 0xab, 0x34,
+	0x8f, 0x84, 0xc6, 0x67, 0x92, 0x5c, 0x9d, 0x22, 0x79, 0x1a, 0x9f, 0x26, 0x71, 0xff, 0x5a, 0x80,
+	0xea, 0x6c, 0x51, 0x46, 0xbf, 0x87, 0x52, 0x37, 0x14, 0xa6, 0x33, 0xa9, 0xc3, 0xac, 0xde, 0x6d,
+	0x5c, 0xb0, 0x9e, 0xd7, 0x1f, 0x87, 0x42, 0x75, 0x30, 0xaf, 0xd8, 0x35, 0x0f, 0xbb, 0xbf, 0x86,
+	0xa2, 0xdd, 0x43, 0x2b, 0x50, 0x6e, 0x1e, 0xed, 0xb5, 0x0e, 0x8f, 0x9e, 0xb6, 0x5f, 0x54, 0xaf,
+	0xa8, 0xe5, 0xab, 0x83, 0xa7, 0x2f, 0xf6, 0xf5, 0xb2, 0x80, 0x96, 0xa1, 0xf4, 0xe8, 0x69, 0x7b,
+	0xaf, 0x79, 0xb4, 0xff, 0xa8, 0xba, 0xe0, 0xfe, 0x63, 0x11, 0xae, 0x9f, 0x51, 0x81, 0xf3, 0x09,
+	0x50, 0x98, 0x4e, 0x80, 0x5b, 0x00, 0x2a, 0x73, 0x03, 0x5d, 0x1d, 0xac, 0xff, 0x72, 0x3b, 0xc8,
+	0x85, 0xd2, 0x48, 0x28, 0x07, 0x0c, 0x88, 0x75, 0x4c, 0xba, 0x56, 0xb2, 0x21, 0x16, 0xe2, 0x84,
+	0xf1, 0xd0, 0x26, 0x49, 0xba, 0xce, 0x12, 0xf1, 0x5a, 0x3e, 0x11, 0x4d, 0x56, 0x75, 0x69, 0x44,
+	0x6c, 0x62, 0x2c, 0x05, 0xf8, 0x31, 0x8d, 0x48, 0x3e, 0xdd, 0x8a, 0x53, 0xe9, 0xb6, 0x0d, 0x65,
+	0x95, 0x67, 0x06, 0x53, 0x32, 0x46, 0xd4, 0x86, 0x46, 0xd5, 0xa0, 0xd4, 0x27, 0x13, 0x23, 0xb3,
+	0xb1, 0xde, 0x27, 0x13, 0x2d, 0x3a, 0x82, 0x8d, 0x24, 0x25, 0x7c, 0xd1, 0xa7, 0x43, 0x7f, 0x4c,
+	0x38, 0xed, 0x4e, 0xec, 0xf8, 0x74, 0x5e, 0x2a, 0xa1, 0x04, 0xd7, 0xee, 0xd3, 0xe1, 0x4b, 0x8d,
+	0x42, 0xf7, 0xa0, 0x7c, 0x82, 0xa9, 0xf4, 0x25, 0x1d, 0x10, 0x3d, 0xd3, 0x9c, 0x3b, 0xaf, 0x94,
+	0x94, 0xee, 0x0b, 0x3a, 0x20, 0x88, 0xc1, 0xba, 0x30, 0x2d, 0xc3, 0xcf, 0x7a, 0xbd, 0x99, 0x77,
+	0x9a, 0x17, 0x6f, 0xa0, 0x49, 0xdb, 0x39, 0x35, 0x06, 0x54, 0xc5, 0x8c, 0xc0, 0x7d, 0x00, 0x5b,
+	0x73, 0x94, 0xd1, 0xfb, 0xb0, 0xac, 0xee, 0xd5, 0x37, 0x17, 0xab, 0x02, 0x41, 0x7d, 0x0e, 0x55,
+	0xd4, 0x5e, 0xcb, 0x6c, 0xb9, 0xdf, 0x15, 0x60, 0x6b, 0x4e, 0xe3, 0x45, 0xaf, 0xa1, 0xa2, 0xba,
+	0x93, 0xaf, 0xdb, 0x93, 0x09, 0xa3, 0xca, 0xdd, 0xcf, 0x2e, 0xd7, 0xbd, 0xeb, 0x6a, 0x82, 0x3b,
+	0xd2, 0x04, 0x1e, 0xf0, 0xf4, 0xd9, 0xfd, 0x14, 0x20, 0x93, 0xa0, 0x2a, 0x5c, 0xfd, 0xfa, 0x79,
+	0x5b, 0x5b, 0x58, 0xf0, 0xd4, 0xa3, 0x0a, 0xa6, 0xce, 0x88, 0x0b, 0xa9, 0xe3, 0x73, 0xc5, 0x33,
+	0x8b, 0xcf, 0x37, 0xbf, 0xfd, 0x61, 0x71, 0x11, 0x16, 0x84, 0xfc, 0xf6, 0x87, 0x45, 0x40, 0xa5,
+	0xe4, 0x37, 0x8c, 0xe6, 0x1a, 0xac, 0x4c, 0x7d, 0x63, 0xa9, 0x8d, 0xa9, 0xcf, 0x81, 0xe6, 0x3a,
+	0xac, 0xcd, 0x8c, 0xbd, 0xbb, 0xff, 0xbd, 0x0a, 0x95, 0xdc, 0xb4, 0x84, 0x76, 0x61, 0xe5, 0x4d,
+	0x28, 0xfc, 0x6c, 0x92, 0x35, 0x79, 0x53, 0x79, 0x13, 0x8a, 0x66, 0x32, 0xc8, 0x7e, 0x0c, 0x1b,
+	0x63, 0x1c, 0xd1, 0x50, 0x9f, 0x2d, 0xa7, 0x6a, 0xb2, 0x08, 0x65, 0xb2, 0x14, 0xf1, 0xec, 0x5d,
+	0xe6, 0xd0, 0xd3, 0x33, 0xe8, 0x37, 0x50, 0x23, 0x71, 0x38, 0x64, 0x34, 0x96, 0xc2, 0x3f, 0xc1,
+	0x7c, 0x40, 0xe3, 0x9e, 0x8e, 0x51, 0x36, 0x92, 0xf6, 0xdb, 0xf5, 0x9c, 0x30, 0xdd, 0x4a, 0xb1,
+	0xaf, 0x0c, 0xf4, 0x85, 0x41, 0xa2, 0x7d, 0xa8, 0xe0, 0x13, 0xe1, 0x33, 0xe3, 0x0a, 0xfb, 0x89,
+	0xfa, 0xd3, 0xb9, 0x93, 0x65, 0x7d, 0xef, 0x55, 0x3b, 0x89, 0x48, 0xc0, 0x27, 0x22, 0x71, 0xe1,
+	0x63, 0xd8, 0x09, 0xa9, 0xc0, 0x9d, 0x88, 0xf8, 0xb9, 0x6f, 0xa7, 0x90, 0x08, 0x49, 0x63, 0x6c,
+	0xa8, 0x97, 0xf4, 0x98, 0x7e, 0xd3, 0xaa, 0x65, 0x51, 0xf3, 0x28, 0xa7, 0xe4, 0x1e, 0x01, 0x64,
+	0x16, 0xd0, 0xef, 0x60, 0x9b, 0xc4, 0x9a, 0x34, 0xe0, 0x24, 0x24, 0xb1, 0xa4, 0x38, 0x12, 0x49,
+	0x76, 0x99, 0x56, 0x54, 0xf2, 0x6a, 0x46, 0xa5, 0x95, 0x69, 0xd8, 0x74, 0x98, 0xec, 0xfe, 0x7d,
+	0x11, 0x56, 0xa7, 0x87, 0x5c, 0xf4, 0x29, 0x6c, 0xe6, 0xee, 0xd1, 0x76, 0xe6, 0xdc, 0xa5, 0xe7,
+	0x6e, 0xd9, 0x34, 0x68, 0x7d, 0x97, 0x9f, 0xa9, 0xaf, 0x34, 0x73, 0x3c, 0x3c, 0x92, 0xcc, 0xef,
+	0x91, 0xd8, 0xb7, 0xd3, 0xb2, 0x69, 0x44, 0x25, 0x6f, 0xd3, 0x2a, 0xec, 0x8d, 0x24, 0x7b, 0x42,
+	0x62, 0x6b, 0x56, 0xa8, 0x41, 0x38, 0xa3, 0xb4, 0x01, 0x50, 0x3f, 0x6f, 0x0e, 0xaf, 0xbf, 0x4c,
+	0xd5, 0x53, 0x4f, 0x67, 0x0c, 0xee, 0xbf, 0x16, 0x60, 0xfd, 0x94, 0x06, 0x7a, 0x08, 0x37, 0x4c,
+	0x63, 0x9b, 0x73, 0x38, 0x13, 0xa6, 0x35, 0xad, 0xf3, 0xf2, 0xac, 0x13, 0x7e, 0x01, 0xdb, 0x39,
+	0xe8, 0x09, 0xe9, 0x1c, 0x33, 0xd6, 0xf7, 0xd5, 0xf4, 0x92, 0x1b, 0x98, 0x9c, 0x4c, 0xe5, 0x95,
+	0xd1, 0x78, 0x11, 0x09, 0x3d, 0x08, 0xdd, 0x07, 0x77, 0x0e, 0x5c, 0x0d, 0x1d, 0xa6, 0x61, 0x6c,
+	0x9d, 0x85, 0x56, 0x63, 0x52, 0x0b, 0x6e, 0x99, 0x99, 0xd0, 0x57, 0x6e, 0xc9, 0x1f, 0xa1, 0x8b,
+	0x69, 0xa4, 0x86, 0xa2, 0x6b, 0xda, 0xc5, 0xdb, 0x46, 0x4b, 0x85, 0x63, 0x76, 0x86, 0xc7, 0x46,
+	0x05, 0x3d, 0x84, 0x15, 0x1c, 0x29, 0x8f, 0xfb, 0x38, 0x08, 0xc8, 0x50, 0xda, 0xdf, 0x30, 0xce,
+	0xab, 0xfe, 0xcb, 0x06, 0xb0, 0xa7, 0xf5, 0x9b, 0xf7, 0xfe, 0xf6, 0x9f, 0x5b, 0x85, 0xd7, 0x1f,
+	0x5f, 0xec, 0xe7, 0xb0, 0x61, 0xbf, 0x67, 0x7f, 0x12, 0xeb, 0x2c, 0x69, 0xe6, 0x5f, 0xfd, 0x18,
+	0x00, 0x00, 0xff, 0xff, 0x2f, 0x86, 0x76, 0x18, 0x86, 0x15, 0x00, 0x00,
 }
 
 func (this *Settings) Equal(that interface{}) bool {
@@ -768,7 +1650,37 @@ func (this *Settings) Equal(that interface{}) bool {
 	if !this.CircuitBreakers.Equal(that1.CircuitBreakers) {
 		return false
 	}
+	if !this.Knative.Equal(that1.Knative) {
+		return false
+	}
+	if !this.Discovery.Equal(that1.Discovery) {
+		return false
+	}
+	if !this.Gloo.Equal(that1.Gloo) {
+		return false
+	}
+	if !this.Gateway.Equal(that1.Gateway) {
+		return false
+	}
+	if !this.Consul.Equal(that1.Consul) {
+		return false
+	}
+	if !this.Kubernetes.Equal(that1.Kubernetes) {
+		return false
+	}
 	if !this.Extensions.Equal(that1.Extensions) {
+		return false
+	}
+	if !this.Ratelimit.Equal(that1.Ratelimit) {
+		return false
+	}
+	if !this.RatelimitServer.Equal(that1.RatelimitServer) {
+		return false
+	}
+	if !this.Rbac.Equal(that1.Rbac) {
+		return false
+	}
+	if !this.Extauth.Equal(that1.Extauth) {
 		return false
 	}
 	if !this.Metadata.Equal(&that1.Metadata) {
@@ -826,6 +1738,30 @@ func (this *Settings_DirectoryConfigSource) Equal(that interface{}) bool {
 		return false
 	}
 	if !this.DirectoryConfigSource.Equal(that1.DirectoryConfigSource) {
+		return false
+	}
+	return true
+}
+func (this *Settings_ConsulKvSource) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*Settings_ConsulKvSource)
+	if !ok {
+		that2, ok := that.(Settings_ConsulKvSource)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if !this.ConsulKvSource.Equal(that1.ConsulKvSource) {
 		return false
 	}
 	return true
@@ -950,6 +1886,30 @@ func (this *Settings_DirectoryArtifactSource) Equal(that interface{}) bool {
 	}
 	return true
 }
+func (this *Settings_ConsulKvArtifactSource) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*Settings_ConsulKvArtifactSource)
+	if !ok {
+		that2, ok := that.(Settings_ConsulKvArtifactSource)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if !this.ConsulKvArtifactSource.Equal(that1.ConsulKvArtifactSource) {
+		return false
+	}
+	return true
+}
 func (this *Settings_KubernetesCrds) Equal(that interface{}) bool {
 	if that == nil {
 		return this == nil
@@ -1017,6 +1977,60 @@ func (this *Settings_VaultSecrets) Equal(that interface{}) bool {
 	} else if this == nil {
 		return false
 	}
+	if this.Token != that1.Token {
+		return false
+	}
+	if this.Address != that1.Address {
+		return false
+	}
+	if this.CaCert != that1.CaCert {
+		return false
+	}
+	if this.CaPath != that1.CaPath {
+		return false
+	}
+	if this.ClientCert != that1.ClientCert {
+		return false
+	}
+	if this.ClientKey != that1.ClientKey {
+		return false
+	}
+	if this.TlsServerName != that1.TlsServerName {
+		return false
+	}
+	if !this.Insecure.Equal(that1.Insecure) {
+		return false
+	}
+	if this.RootKey != that1.RootKey {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *Settings_ConsulKv) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*Settings_ConsulKv)
+	if !ok {
+		that2, ok := that.(Settings_ConsulKv)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.RootKey != that1.RootKey {
+		return false
+	}
 	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
 		return false
 	}
@@ -1066,6 +2080,356 @@ func (this *Settings_Directory) Equal(that interface{}) bool {
 		return false
 	}
 	if this.Directory != that1.Directory {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *Settings_KnativeOptions) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*Settings_KnativeOptions)
+	if !ok {
+		that2, ok := that.(Settings_KnativeOptions)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.ClusterIngressProxyAddress != that1.ClusterIngressProxyAddress {
+		return false
+	}
+	if this.KnativeExternalProxyAddress != that1.KnativeExternalProxyAddress {
+		return false
+	}
+	if this.KnativeInternalProxyAddress != that1.KnativeInternalProxyAddress {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *Settings_DiscoveryOptions) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*Settings_DiscoveryOptions)
+	if !ok {
+		that2, ok := that.(Settings_DiscoveryOptions)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.FdsMode != that1.FdsMode {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *Settings_ConsulConfiguration) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*Settings_ConsulConfiguration)
+	if !ok {
+		that2, ok := that.(Settings_ConsulConfiguration)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.Address != that1.Address {
+		return false
+	}
+	if this.Datacenter != that1.Datacenter {
+		return false
+	}
+	if this.Username != that1.Username {
+		return false
+	}
+	if this.Password != that1.Password {
+		return false
+	}
+	if this.Token != that1.Token {
+		return false
+	}
+	if this.CaFile != that1.CaFile {
+		return false
+	}
+	if this.CaPath != that1.CaPath {
+		return false
+	}
+	if this.CertFile != that1.CertFile {
+		return false
+	}
+	if this.KeyFile != that1.KeyFile {
+		return false
+	}
+	if !this.InsecureSkipVerify.Equal(that1.InsecureSkipVerify) {
+		return false
+	}
+	if !this.WaitTime.Equal(that1.WaitTime) {
+		return false
+	}
+	if !this.ServiceDiscovery.Equal(that1.ServiceDiscovery) {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *Settings_ConsulConfiguration_ServiceDiscoveryOptions) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*Settings_ConsulConfiguration_ServiceDiscoveryOptions)
+	if !ok {
+		that2, ok := that.(Settings_ConsulConfiguration_ServiceDiscoveryOptions)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if len(this.DataCenters) != len(that1.DataCenters) {
+		return false
+	}
+	for i := range this.DataCenters {
+		if this.DataCenters[i] != that1.DataCenters[i] {
+			return false
+		}
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *Settings_KubernetesConfiguration) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*Settings_KubernetesConfiguration)
+	if !ok {
+		that2, ok := that.(Settings_KubernetesConfiguration)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if !this.RateLimits.Equal(that1.RateLimits) {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *Settings_KubernetesConfiguration_RateLimits) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*Settings_KubernetesConfiguration_RateLimits)
+	if !ok {
+		that2, ok := that.(Settings_KubernetesConfiguration_RateLimits)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.QPS != that1.QPS {
+		return false
+	}
+	if this.Burst != that1.Burst {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *GlooOptions) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*GlooOptions)
+	if !ok {
+		that2, ok := that.(GlooOptions)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.XdsBindAddr != that1.XdsBindAddr {
+		return false
+	}
+	if this.ValidationBindAddr != that1.ValidationBindAddr {
+		return false
+	}
+	if !this.CircuitBreakers.Equal(that1.CircuitBreakers) {
+		return false
+	}
+	if !this.EndpointsWarmingTimeout.Equal(that1.EndpointsWarmingTimeout) {
+		return false
+	}
+	if !this.AwsOptions.Equal(that1.AwsOptions) {
+		return false
+	}
+	if this.DisableKubernetesDestinations != that1.DisableKubernetesDestinations {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *GlooOptions_AWSOptions) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*GlooOptions_AWSOptions)
+	if !ok {
+		that2, ok := that.(GlooOptions_AWSOptions)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.EnableCredentialsDiscovey != that1.EnableCredentialsDiscovey {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *GatewayOptions) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*GatewayOptions)
+	if !ok {
+		that2, ok := that.(GatewayOptions)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.ValidationServerAddr != that1.ValidationServerAddr {
+		return false
+	}
+	if this.DisableAutoGenGateways != that1.DisableAutoGenGateways {
+		return false
+	}
+	if !this.Validation.Equal(that1.Validation) {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *GatewayOptions_ValidationOptions) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*GatewayOptions_ValidationOptions)
+	if !ok {
+		that2, ok := that.(GatewayOptions_ValidationOptions)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.ProxyValidationServerAddr != that1.ProxyValidationServerAddr {
+		return false
+	}
+	if this.ValidationWebhookTlsCert != that1.ValidationWebhookTlsCert {
+		return false
+	}
+	if this.ValidationWebhookTlsKey != that1.ValidationWebhookTlsKey {
+		return false
+	}
+	if this.IgnoreGlooValidationFailure != that1.IgnoreGlooValidationFailure {
+		return false
+	}
+	if !this.AlwaysAccept.Equal(that1.AlwaysAccept) {
 		return false
 	}
 	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {

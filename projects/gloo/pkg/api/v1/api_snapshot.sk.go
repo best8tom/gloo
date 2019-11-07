@@ -5,6 +5,8 @@ package v1
 import (
 	"fmt"
 
+	enterprise_gloo_solo_io "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/enterprise/plugins/extauth/v1"
+
 	"github.com/solo-io/go-utils/hashutils"
 	"go.uber.org/zap"
 )
@@ -13,9 +15,10 @@ type ApiSnapshot struct {
 	Artifacts      ArtifactList
 	Endpoints      EndpointList
 	Proxies        ProxyList
-	Upstreamgroups UpstreamGroupList
+	UpstreamGroups UpstreamGroupList
 	Secrets        SecretList
 	Upstreams      UpstreamList
+	AuthConfigs    enterprise_gloo_solo_io.AuthConfigList
 }
 
 func (s ApiSnapshot) Clone() ApiSnapshot {
@@ -23,9 +26,10 @@ func (s ApiSnapshot) Clone() ApiSnapshot {
 		Artifacts:      s.Artifacts.Clone(),
 		Endpoints:      s.Endpoints.Clone(),
 		Proxies:        s.Proxies.Clone(),
-		Upstreamgroups: s.Upstreamgroups.Clone(),
+		UpstreamGroups: s.UpstreamGroups.Clone(),
 		Secrets:        s.Secrets.Clone(),
 		Upstreams:      s.Upstreams.Clone(),
+		AuthConfigs:    s.AuthConfigs.Clone(),
 	}
 }
 
@@ -34,9 +38,10 @@ func (s ApiSnapshot) Hash() uint64 {
 		s.hashArtifacts(),
 		s.hashEndpoints(),
 		s.hashProxies(),
-		s.hashUpstreamgroups(),
+		s.hashUpstreamGroups(),
 		s.hashSecrets(),
 		s.hashUpstreams(),
+		s.hashAuthConfigs(),
 	)
 }
 
@@ -52,8 +57,8 @@ func (s ApiSnapshot) hashProxies() uint64 {
 	return hashutils.HashAll(s.Proxies.AsInterfaces()...)
 }
 
-func (s ApiSnapshot) hashUpstreamgroups() uint64 {
-	return hashutils.HashAll(s.Upstreamgroups.AsInterfaces()...)
+func (s ApiSnapshot) hashUpstreamGroups() uint64 {
+	return hashutils.HashAll(s.UpstreamGroups.AsInterfaces()...)
 }
 
 func (s ApiSnapshot) hashSecrets() uint64 {
@@ -64,14 +69,19 @@ func (s ApiSnapshot) hashUpstreams() uint64 {
 	return hashutils.HashAll(s.Upstreams.AsInterfaces()...)
 }
 
+func (s ApiSnapshot) hashAuthConfigs() uint64 {
+	return hashutils.HashAll(s.AuthConfigs.AsInterfaces()...)
+}
+
 func (s ApiSnapshot) HashFields() []zap.Field {
 	var fields []zap.Field
 	fields = append(fields, zap.Uint64("artifacts", s.hashArtifacts()))
 	fields = append(fields, zap.Uint64("endpoints", s.hashEndpoints()))
 	fields = append(fields, zap.Uint64("proxies", s.hashProxies()))
-	fields = append(fields, zap.Uint64("upstreamgroups", s.hashUpstreamgroups()))
+	fields = append(fields, zap.Uint64("upstreamGroups", s.hashUpstreamGroups()))
 	fields = append(fields, zap.Uint64("secrets", s.hashSecrets()))
 	fields = append(fields, zap.Uint64("upstreams", s.hashUpstreams()))
+	fields = append(fields, zap.Uint64("authConfigs", s.hashAuthConfigs()))
 
 	return append(fields, zap.Uint64("snapshotHash", s.Hash()))
 }
@@ -81,9 +91,10 @@ type ApiSnapshotStringer struct {
 	Artifacts      []string
 	Endpoints      []string
 	Proxies        []string
-	Upstreamgroups []string
+	UpstreamGroups []string
 	Secrets        []string
 	Upstreams      []string
+	AuthConfigs    []string
 }
 
 func (ss ApiSnapshotStringer) String() string {
@@ -104,8 +115,8 @@ func (ss ApiSnapshotStringer) String() string {
 		s += fmt.Sprintf("    %v\n", name)
 	}
 
-	s += fmt.Sprintf("  Upstreamgroups %v\n", len(ss.Upstreamgroups))
-	for _, name := range ss.Upstreamgroups {
+	s += fmt.Sprintf("  UpstreamGroups %v\n", len(ss.UpstreamGroups))
+	for _, name := range ss.UpstreamGroups {
 		s += fmt.Sprintf("    %v\n", name)
 	}
 
@@ -119,6 +130,11 @@ func (ss ApiSnapshotStringer) String() string {
 		s += fmt.Sprintf("    %v\n", name)
 	}
 
+	s += fmt.Sprintf("  AuthConfigs %v\n", len(ss.AuthConfigs))
+	for _, name := range ss.AuthConfigs {
+		s += fmt.Sprintf("    %v\n", name)
+	}
+
 	return s
 }
 
@@ -128,8 +144,9 @@ func (s ApiSnapshot) Stringer() ApiSnapshotStringer {
 		Artifacts:      s.Artifacts.NamespacesDotNames(),
 		Endpoints:      s.Endpoints.NamespacesDotNames(),
 		Proxies:        s.Proxies.NamespacesDotNames(),
-		Upstreamgroups: s.Upstreamgroups.NamespacesDotNames(),
+		UpstreamGroups: s.UpstreamGroups.NamespacesDotNames(),
 		Secrets:        s.Secrets.NamespacesDotNames(),
 		Upstreams:      s.Upstreams.NamespacesDotNames(),
+		AuthConfigs:    s.AuthConfigs.NamespacesDotNames(),
 	}
 }

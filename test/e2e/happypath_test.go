@@ -8,6 +8,12 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
+
+	gatewaydefaults "github.com/solo-io/gloo/projects/gateway/pkg/defaults"
+
+	"github.com/pkg/errors"
+	"github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/healthcheck"
 
 	"github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/stats"
 
@@ -86,7 +92,7 @@ var _ = Describe("Happy path", func() {
 				},
 			}
 			testClients = services.RunGlooGatewayUdsFds(ctx, ro)
-			err := envoyInstance.RunWithRole(ns+"~gateway-proxy", testClients.GlooPort)
+			err := envoyInstance.RunWithRole(ns+"~gateway-proxy-v2", testClients.GlooPort)
 			Expect(err).NotTo(HaveOccurred())
 
 			up = tu.Upstream
@@ -133,6 +139,52 @@ var _ = Describe("Happy path", func() {
 
 			// Verify that stats for the above virtual cluster are present
 			Expect(statsString).To(ContainSubstring("vhost.virt1.vcluster.test-vc."))
+		})
+
+		It("passes a health check", func() {
+			proxy := getTrivialProxyForUpstream(defaults.GlooSystem, envoyPort, up.Metadata.Ref())
+
+			// Set a virtual cluster matching everything
+			proxy.Listeners[0].GetHttpListener().ListenerPlugins = &gloov1.HttpListenerPlugins{
+				HealthCheck: &healthcheck.HealthCheck{
+					Path: "/healthy",
+				},
+			}
+
+			proxy.Listeners[0].GetHttpListener().VirtualHosts[0].Routes[0].Action = &gloov1.Route_DirectResponseAction{
+				DirectResponseAction: &gloov1.DirectResponseAction{
+					Status: 400,
+					Body:   "only health checks work on me. sorry!",
+				},
+			}
+			_, err := testClients.ProxyClient.Write(proxy, clients.WriteOpts{})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func() error {
+				res, err := http.Get(fmt.Sprintf("http://%s:%d/healthy", "localhost", envoyPort))
+				if err != nil {
+					return err
+				}
+				if res.StatusCode != 200 {
+					return errors.Errorf("bad status code: %v", res.StatusCode)
+				}
+				return nil
+			}, time.Second*10, time.Second/2).ShouldNot(HaveOccurred())
+
+			res, err := http.Post(fmt.Sprintf("http://localhost:%v/healthcheck/fail", envoyInstance.AdminPort), "", nil)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.StatusCode).To(Equal(200))
+
+			Eventually(func() error {
+				res, err := http.Get(fmt.Sprintf("http://%s:%d/healthy", "localhost", envoyPort))
+				if err != nil {
+					return err
+				}
+				if res.StatusCode != 503 {
+					return errors.Errorf("bad status code: %v", res.StatusCode)
+				}
+				return nil
+			}, time.Second*10, time.Second/2).ShouldNot(HaveOccurred())
 		})
 
 		Context("ssl", func() {
@@ -255,7 +307,11 @@ var _ = Describe("Happy path", func() {
 				namespace = "gloo-e2e-" + helpers.RandString(8)
 			}
 
-			err := setup.SetupKubeForTest(namespace)
+			_, err := kubeClient.CoreV1().Namespaces().Create(&kubev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: namespace,
+				},
+			})
 			Expect(err).NotTo(HaveOccurred())
 
 			svc, err = kubeClient.CoreV1().Services(namespace).Create(&kubev1.Service{
@@ -281,7 +337,7 @@ var _ = Describe("Happy path", func() {
 				},
 				Subsets: []kubev1.EndpointSubset{{
 					Addresses: []kubev1.EndpointAddress{{
-						IP:       getIpThatsNotLocalhost(),
+						IP:       getIpThatsNotLocalhost(envoyInstance),
 						Hostname: "localhost",
 					}},
 					Ports: []kubev1.EndpointPort{{
@@ -320,7 +376,7 @@ var _ = Describe("Happy path", func() {
 				writeNamespace = namespace
 				ro := &services.RunOptions{
 					NsToWrite: writeNamespace,
-					NsToWatch: []string{"default", namespace},
+					NsToWatch: []string{namespace},
 					WhatToRun: services.What{
 						DisableGateway: true,
 					},
@@ -328,7 +384,7 @@ var _ = Describe("Happy path", func() {
 				}
 
 				testClients = services.RunGlooGatewayUdsFds(ctx, ro)
-				role := namespace + "~gateway-proxy"
+				role := namespace + "~gateway-proxy-v2"
 				err := envoyInstance.RunWithRole(role, testClients.GlooPort)
 				Expect(err).NotTo(HaveOccurred())
 
@@ -363,8 +419,9 @@ var _ = Describe("Happy path", func() {
 		Context("all namespaces", func() {
 			BeforeEach(func() {
 				namespace = "gloo-e2e-" + helpers.RandString(8)
+				prepNamespace()
 
-				writeNamespace = defaults.GlooSystem
+				writeNamespace = namespace
 				ro := &services.RunOptions{
 					NsToWrite: writeNamespace,
 					NsToWatch: []string{},
@@ -375,11 +432,10 @@ var _ = Describe("Happy path", func() {
 				}
 
 				testClients = services.RunGlooGatewayUdsFds(ctx, ro)
-				role := namespace + "~gateway-proxy"
+				role := namespace + "~gateway-proxy-v2"
 				err := envoyInstance.RunWithRole(role, testClients.GlooPort)
 				Expect(err).NotTo(HaveOccurred())
 
-				prepNamespace()
 			})
 
 			It("watch all namespaces", func() {
@@ -414,8 +470,8 @@ func getTrivialProxyForService(ns string, bindPort uint32, service core.Resource
 	proxy.Listeners[0].ListenerType.(*gloov1.Listener_HttpListener).HttpListener.
 		VirtualHosts[0].Routes[0].Action.(*gloov1.Route_RouteAction).RouteAction.
 		Destination.(*gloov1.RouteAction_Single).Single.DestinationType =
-		&gloov1.Destination_Service{
-			Service: &gloov1.ServiceDestination{
+		&gloov1.Destination_Kube{
+			Kube: &gloov1.KubernetesServiceDestination{
 				Ref:  service,
 				Port: svcPort,
 			},
@@ -426,7 +482,7 @@ func getTrivialProxyForService(ns string, bindPort uint32, service core.Resource
 func getTrivialProxy(ns string, bindPort uint32) *gloov1.Proxy {
 	return &gloov1.Proxy{
 		Metadata: core.Metadata{
-			Name:      "gateway-proxy",
+			Name:      gatewaydefaults.GatewayProxyName,
 			Namespace: ns,
 		},
 		Listeners: []*gloov1.Listener{{
@@ -459,7 +515,7 @@ func getTrivialProxy(ns string, bindPort uint32) *gloov1.Proxy {
 	}
 }
 
-func getIpThatsNotLocalhost() string {
+func getIpThatsNotLocalhost(instance *services.EnvoyInstance) string {
 	// kubernetes endpoints doesn't like localhost, so we just give it some other local address
 	// from: k8s.io/kubernetes/pkg/apis/core/validation/validation.go
 	/*
@@ -469,6 +525,11 @@ func getIpThatsNotLocalhost() string {
 		        // addresses tend to be used for node-centric purposes (e.g. metadata
 		        // service).
 	*/
+
+	if instance.UseDocker {
+		return instance.LocalAddr()
+	}
+
 	ifaces, err := net.Interfaces()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 

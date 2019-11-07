@@ -22,6 +22,7 @@ import (
 
 	"github.com/gogo/protobuf/types"
 	"github.com/pkg/errors"
+	envoy_transform "github.com/solo-io/gloo/projects/gloo/pkg/api/external/envoy/extensions/transformation"
 	v1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1"
 	glooplugins "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins"
 	grpcapi "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/grpc"
@@ -29,6 +30,7 @@ import (
 	"github.com/solo-io/gloo/projects/gloo/pkg/plugins"
 	"github.com/solo-io/gloo/projects/gloo/pkg/plugins/pluginutils"
 	"github.com/solo-io/gloo/projects/gloo/pkg/plugins/transformation"
+	transformutils "github.com/solo-io/gloo/projects/gloo/pkg/plugins/utils/transformation"
 	"github.com/solo-io/go-utils/log"
 	"github.com/solo-io/solo-kit/pkg/api/v1/resources/core"
 )
@@ -38,7 +40,7 @@ type ServicesAndDescriptor struct {
 	Descriptors *descriptor.FileDescriptorSet
 }
 
-func NewPlugin(transformsAdded *bool) plugins.Plugin {
+func NewPlugin(transformsAdded *bool) *plugin {
 	return &plugin{
 		recordedUpstreams: make(map[core.ResourceRef]*v1.Upstream),
 		upstreamServices:  make(map[string]ServicesAndDescriptor),
@@ -55,11 +57,10 @@ type plugin struct {
 }
 
 const (
-	filterName  = "envoy.grpc_json_transcoder"
-	pluginStage = plugins.PreOutAuth
-
-	ServiceTypeGRPC = "gRPC"
+	filterName = "envoy.grpc_json_transcoder"
 )
+
+var pluginStage = plugins.BeforeStage(plugins.OutAuthStage)
 
 func (p *plugin) Init(params plugins.InitParams) error {
 	p.ctx = params.Ctx
@@ -114,6 +115,9 @@ func (p *plugin) ProcessUpstream(params plugins.Params, in *v1.Upstream, out *en
 }
 
 func genFullServiceName(packageName, serviceName string) string {
+	if packageName == "" {
+		return serviceName
+	}
 	return packageName + "." + serviceName
 }
 
@@ -144,6 +148,9 @@ func (p *plugin) ProcessRoute(params plugins.RouteParams, in *v1.Route, out *env
 		grpcDestinationSpec := *grpcDestinationSpecWrapper.Grpc
 
 		if grpcDestinationSpec.Parameters == nil {
+			if in.Matcher.PathSpecifier == nil {
+				return nil, errors.New("missing path for grpc route")
+			}
 			path := utils.PathAsString(in.Matcher) + "?{query_string}"
 
 			grpcDestinationSpec.Parameters = &transformapi.Parameters{
@@ -171,20 +178,30 @@ func (p *plugin) ProcessRoute(params plugins.RouteParams, in *v1.Route, out *env
 
 		// add query matcher to out path. kombina for now
 		// TODO: support query for matching
-		outPath += `?{{ default(query_string), "")}}`
+		outPath += `?{{ default(query_string, "")}}`
+
+		// Add param extractors back
+		var extractors map[string]*envoy_transform.Extraction
+		if grpcDestinationSpec.Parameters != nil {
+			extractors, err = transformutils.CreateRequestExtractors(params.Ctx, grpcDestinationSpec.Parameters)
+			if err != nil {
+				return nil, err
+			}
+		}
 
 		// we always choose post
 		httpMethod := "POST"
-		return &transformapi.RouteTransformations{
-			RequestTransformation: &transformapi.Transformation{
-				TransformationType: &transformapi.Transformation_TransformationTemplate{
-					TransformationTemplate: &transformapi.TransformationTemplate{
-						Headers: map[string]*transformapi.InjaTemplate{
+		return &envoy_transform.RouteTransformations{
+			RequestTransformation: &envoy_transform.Transformation{
+				TransformationType: &envoy_transform.Transformation_TransformationTemplate{
+					TransformationTemplate: &envoy_transform.TransformationTemplate{
+						Extractors: extractors,
+						Headers: map[string]*envoy_transform.InjaTemplate{
 							":method": {Text: httpMethod},
 							":path":   {Text: outPath},
 						},
-						BodyTransformation: &transformapi.TransformationTemplate_MergeExtractorsToBody{
-							MergeExtractorsToBody: &transformapi.MergeExtractorsToBody{},
+						BodyTransformation: &envoy_transform.TransformationTemplate_MergeExtractorsToBody{
+							MergeExtractorsToBody: &envoy_transform.MergeExtractorsToBody{},
 						},
 					},
 				},

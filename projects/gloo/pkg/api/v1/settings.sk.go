@@ -3,6 +3,7 @@
 package v1
 
 import (
+	"log"
 	"sort"
 
 	"github.com/solo-io/go-utils/hashutils"
@@ -34,6 +35,8 @@ func (r *Settings) SetStatus(status core.Status) {
 func (r *Settings) Hash() uint64 {
 	metaCopy := r.GetMetadata()
 	metaCopy.ResourceVersion = ""
+	metaCopy.Generation = 0
+	// investigate zeroing out owner refs as well
 	return hashutils.HashAll(
 		metaCopy,
 		r.DiscoveryNamespace,
@@ -43,11 +46,25 @@ func (r *Settings) Hash() uint64 {
 		r.DevMode,
 		r.Linkerd,
 		r.CircuitBreakers,
+		r.Knative,
+		r.Discovery,
+		r.Gloo,
+		r.Gateway,
+		r.Consul,
+		r.Kubernetes,
 		r.Extensions,
+		r.Ratelimit,
+		r.RatelimitServer,
+		r.Rbac,
+		r.Extauth,
 		r.ConfigSource,
 		r.SecretSource,
 		r.ArtifactSource,
 	)
+}
+
+func (r *Settings) GroupVersionKind() schema.GroupVersionKind {
+	return SettingsGVK
 }
 
 type SettingsList []*Settings
@@ -131,8 +148,6 @@ func (list SettingsList) AsInterfaces() []interface{} {
 	return asInterfaces
 }
 
-var _ resources.Resource = &Settings{}
-
 // Kubernetes Adapter for Settings
 
 func (o *Settings) GetObjectKind() schema.ObjectKind {
@@ -144,11 +159,32 @@ func (o *Settings) DeepCopyObject() runtime.Object {
 	return resources.Clone(o).(*Settings)
 }
 
-var SettingsCrd = crd.NewCrd("gloo.solo.io",
-	"settings",
-	"gloo.solo.io",
-	"v1",
-	"Settings",
-	"st",
-	false,
-	&Settings{})
+func (o *Settings) DeepCopyInto(out *Settings) {
+	clone := resources.Clone(o).(*Settings)
+	*out = *clone
+}
+
+var (
+	SettingsCrd = crd.NewCrd(
+		"settings",
+		SettingsGVK.Group,
+		SettingsGVK.Version,
+		SettingsGVK.Kind,
+		"st",
+		false,
+		&Settings{})
+)
+
+func init() {
+	if err := crd.AddCrd(SettingsCrd); err != nil {
+		log.Fatalf("could not add crd to global registry")
+	}
+}
+
+var (
+	SettingsGVK = schema.GroupVersionKind{
+		Version: "v1",
+		Group:   "gloo.solo.io",
+		Kind:    "Settings",
+	}
+)

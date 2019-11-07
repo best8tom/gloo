@@ -28,17 +28,18 @@ var _ = Describe("Kube2e: Knative-Ingress", func() {
 	})
 
 	It("works", func() {
-		clusterIngressProxy := "clusteringress-proxy"
-		clusterIngressPort := 80
+		ingressProxy := "knative-external-proxy"
+		ingressPort := 80
 		testHelper.CurlEventuallyShouldRespond(helper.CurlOpts{
 			Protocol:          "http",
 			Path:              "/",
 			Method:            "GET",
 			Host:              "helloworld-go.default.example.com",
-			Service:           clusterIngressProxy,
-			Port:              clusterIngressPort,
-			ConnectionTimeout: 10,
-		}, "Hello Go Sample v1!", 1, time.Minute*2)
+			Service:           ingressProxy,
+			Port:              ingressPort,
+			ConnectionTimeout: 1,
+			Verbose:           true,
+		}, "Hello Go Sample v1!", 1, time.Minute*2, 1*time.Second)
 	})
 })
 

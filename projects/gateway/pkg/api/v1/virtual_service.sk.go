@@ -3,6 +3,7 @@
 package v1
 
 import (
+	"log"
 	"sort"
 
 	"github.com/solo-io/go-utils/hashutils"
@@ -34,11 +35,17 @@ func (r *VirtualService) SetStatus(status core.Status) {
 func (r *VirtualService) Hash() uint64 {
 	metaCopy := r.GetMetadata()
 	metaCopy.ResourceVersion = ""
+	metaCopy.Generation = 0
+	// investigate zeroing out owner refs as well
 	return hashutils.HashAll(
 		metaCopy,
 		r.VirtualHost,
 		r.SslConfig,
 	)
+}
+
+func (r *VirtualService) GroupVersionKind() schema.GroupVersionKind {
+	return VirtualServiceGVK
 }
 
 type VirtualServiceList []*VirtualService
@@ -122,8 +129,6 @@ func (list VirtualServiceList) AsInterfaces() []interface{} {
 	return asInterfaces
 }
 
-var _ resources.Resource = &VirtualService{}
-
 // Kubernetes Adapter for VirtualService
 
 func (o *VirtualService) GetObjectKind() schema.ObjectKind {
@@ -135,11 +140,32 @@ func (o *VirtualService) DeepCopyObject() runtime.Object {
 	return resources.Clone(o).(*VirtualService)
 }
 
-var VirtualServiceCrd = crd.NewCrd("gateway.solo.io",
-	"virtualservices",
-	"gateway.solo.io",
-	"v1",
-	"VirtualService",
-	"vs",
-	false,
-	&VirtualService{})
+func (o *VirtualService) DeepCopyInto(out *VirtualService) {
+	clone := resources.Clone(o).(*VirtualService)
+	*out = *clone
+}
+
+var (
+	VirtualServiceCrd = crd.NewCrd(
+		"virtualservices",
+		VirtualServiceGVK.Group,
+		VirtualServiceGVK.Version,
+		VirtualServiceGVK.Kind,
+		"vs",
+		false,
+		&VirtualService{})
+)
+
+func init() {
+	if err := crd.AddCrd(VirtualServiceCrd); err != nil {
+		log.Fatalf("could not add crd to global registry")
+	}
+}
+
+var (
+	VirtualServiceGVK = schema.GroupVersionKind{
+		Version: "v1",
+		Group:   "gateway.solo.io",
+		Kind:    "VirtualService",
+	}
+)

@@ -9,22 +9,41 @@ import (
 	math "math"
 	time "time"
 
+	cluster "github.com/envoyproxy/go-control-plane/envoy/api/v2/cluster"
+	core "github.com/envoyproxy/go-control-plane/envoy/api/v2/core"
 	_ "github.com/gogo/protobuf/gogoproto"
 	proto "github.com/gogo/protobuf/proto"
 	_ "github.com/gogo/protobuf/types"
+	transformation "github.com/solo-io/gloo/projects/gloo/pkg/api/external/envoy/extensions/transformation"
+	v1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/enterprise/plugins/extauth/v1"
+	jwt "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/enterprise/plugins/jwt"
+	ratelimit "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/enterprise/plugins/ratelimit"
+	rbac "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/enterprise/plugins/rbac"
+	waf "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/enterprise/plugins/waf"
+	als "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/als"
 	aws "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/aws"
+	ec2 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/aws/ec2"
 	azure "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/azure"
 	consul "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/consul"
+	cors "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/cors"
 	faultinjection "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/faultinjection"
 	grpc "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/grpc"
 	grpc_web "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/grpc_web"
 	hcm "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/hcm"
+	headers "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/headers"
+	healthcheck "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/healthcheck"
+	hostrewrite "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/hostrewrite"
 	kubernetes "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/kubernetes"
+	lbhash "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/lbhash"
+	pipe "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/pipe"
 	rest "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/rest"
 	retries "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/retries"
+	shadowing "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/shadowing"
 	static "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/static"
 	stats "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/stats"
-	transformation "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/transformation"
+	tcp "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/tcp"
+	tracing "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/tracing"
+	transformation1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/plugins/transformation"
 )
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -37,18 +56,19 @@ var _ = time.Kitchen
 // is compatible with the proto package it is being compiled against.
 // A compilation error at this line likely means your copy of the
 // proto package needs to be updated.
-const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
+const _ = proto.GoGoProtoPackageIsVersion3 // please upgrade the proto package
 
-// Plugin-specific configuration that lives on listeners
+// Plugin-specific configuration that lives on gateways
 // Each ListenerPlugin object contains configuration for a specific plugin
 // Note to developers: new Listener Plugins must be added to this struct
 // to be usable by Gloo.
 type ListenerPlugins struct {
-	GrpcWeb                       *grpc_web.GrpcWeb                  `protobuf:"bytes,1,opt,name=grpc_web,json=grpcWeb,proto3" json:"grpc_web,omitempty"`
-	HttpConnectionManagerSettings *hcm.HttpConnectionManagerSettings `protobuf:"bytes,2,opt,name=http_connection_manager_settings,json=httpConnectionManagerSettings,proto3" json:"http_connection_manager_settings,omitempty"`
-	XXX_NoUnkeyedLiteral          struct{}                           `json:"-"`
-	XXX_unrecognized              []byte                             `json:"-"`
-	XXX_sizecache                 int32                              `json:"-"`
+	AccessLoggingService *als.AccessLoggingService `protobuf:"bytes,1,opt,name=access_logging_service,json=accessLoggingService,proto3" json:"access_logging_service,omitempty"`
+	// Deprecated: Opaque config for Gloo plugins
+	Extensions           *Extensions `protobuf:"bytes,2,opt,name=extensions,proto3" json:"extensions,omitempty"` // Deprecated: Do not use.
+	XXX_NoUnkeyedLiteral struct{}    `json:"-"`
+	XXX_unrecognized     []byte      `json:"-"`
+	XXX_sizecache        int32       `json:"-"`
 }
 
 func (m *ListenerPlugins) Reset()         { *m = ListenerPlugins{} }
@@ -75,16 +95,132 @@ func (m *ListenerPlugins) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_ListenerPlugins proto.InternalMessageInfo
 
-func (m *ListenerPlugins) GetGrpcWeb() *grpc_web.GrpcWeb {
+func (m *ListenerPlugins) GetAccessLoggingService() *als.AccessLoggingService {
+	if m != nil {
+		return m.AccessLoggingService
+	}
+	return nil
+}
+
+// Deprecated: Do not use.
+func (m *ListenerPlugins) GetExtensions() *Extensions {
+	if m != nil {
+		return m.Extensions
+	}
+	return nil
+}
+
+// Plugin-specific configuration that lives on http listeners
+type HttpListenerPlugins struct {
+	GrpcWeb                       *grpc_web.GrpcWeb                  `protobuf:"bytes,1,opt,name=grpc_web,json=grpcWeb,proto3" json:"grpc_web,omitempty"`
+	HttpConnectionManagerSettings *hcm.HttpConnectionManagerSettings `protobuf:"bytes,2,opt,name=http_connection_manager_settings,json=httpConnectionManagerSettings,proto3" json:"http_connection_manager_settings,omitempty"`
+	// enable [Envoy health checks](https://www.envoyproxy.io/docs/envoy/v1.7.0/api-v2/config/filter/http/health_check/v2/health_check.proto) on this listener
+	HealthCheck *healthcheck.HealthCheck `protobuf:"bytes,4,opt,name=health_check,json=healthCheck,proto3" json:"health_check,omitempty"`
+	// Deprecated: Opaque config for Gloo plugins
+	Extensions *Extensions `protobuf:"bytes,3,opt,name=extensions,proto3" json:"extensions,omitempty"` // Deprecated: Do not use.
+	// Enterprise-only: Config for Web Application Firewall (WAF), supporting
+	// the popular ModSecurity 3.0 ruleset
+	Waf                  *waf.Settings `protobuf:"bytes,5,opt,name=waf,proto3" json:"waf,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}      `json:"-"`
+	XXX_unrecognized     []byte        `json:"-"`
+	XXX_sizecache        int32         `json:"-"`
+}
+
+func (m *HttpListenerPlugins) Reset()         { *m = HttpListenerPlugins{} }
+func (m *HttpListenerPlugins) String() string { return proto.CompactTextString(m) }
+func (*HttpListenerPlugins) ProtoMessage()    {}
+func (*HttpListenerPlugins) Descriptor() ([]byte, []int) {
+	return fileDescriptor_ae47d2df5fad2a45, []int{1}
+}
+func (m *HttpListenerPlugins) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_HttpListenerPlugins.Unmarshal(m, b)
+}
+func (m *HttpListenerPlugins) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_HttpListenerPlugins.Marshal(b, m, deterministic)
+}
+func (m *HttpListenerPlugins) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_HttpListenerPlugins.Merge(m, src)
+}
+func (m *HttpListenerPlugins) XXX_Size() int {
+	return xxx_messageInfo_HttpListenerPlugins.Size(m)
+}
+func (m *HttpListenerPlugins) XXX_DiscardUnknown() {
+	xxx_messageInfo_HttpListenerPlugins.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_HttpListenerPlugins proto.InternalMessageInfo
+
+func (m *HttpListenerPlugins) GetGrpcWeb() *grpc_web.GrpcWeb {
 	if m != nil {
 		return m.GrpcWeb
 	}
 	return nil
 }
 
-func (m *ListenerPlugins) GetHttpConnectionManagerSettings() *hcm.HttpConnectionManagerSettings {
+func (m *HttpListenerPlugins) GetHttpConnectionManagerSettings() *hcm.HttpConnectionManagerSettings {
 	if m != nil {
 		return m.HttpConnectionManagerSettings
+	}
+	return nil
+}
+
+func (m *HttpListenerPlugins) GetHealthCheck() *healthcheck.HealthCheck {
+	if m != nil {
+		return m.HealthCheck
+	}
+	return nil
+}
+
+// Deprecated: Do not use.
+func (m *HttpListenerPlugins) GetExtensions() *Extensions {
+	if m != nil {
+		return m.Extensions
+	}
+	return nil
+}
+
+func (m *HttpListenerPlugins) GetWaf() *waf.Settings {
+	if m != nil {
+		return m.Waf
+	}
+	return nil
+}
+
+// Plugin-specific configuration that lives on tcp listeners
+type TcpListenerPlugins struct {
+	TcpProxySettings     *tcp.TcpProxySettings `protobuf:"bytes,3,opt,name=tcp_proxy_settings,json=tcpProxySettings,proto3" json:"tcp_proxy_settings,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}              `json:"-"`
+	XXX_unrecognized     []byte                `json:"-"`
+	XXX_sizecache        int32                 `json:"-"`
+}
+
+func (m *TcpListenerPlugins) Reset()         { *m = TcpListenerPlugins{} }
+func (m *TcpListenerPlugins) String() string { return proto.CompactTextString(m) }
+func (*TcpListenerPlugins) ProtoMessage()    {}
+func (*TcpListenerPlugins) Descriptor() ([]byte, []int) {
+	return fileDescriptor_ae47d2df5fad2a45, []int{2}
+}
+func (m *TcpListenerPlugins) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_TcpListenerPlugins.Unmarshal(m, b)
+}
+func (m *TcpListenerPlugins) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_TcpListenerPlugins.Marshal(b, m, deterministic)
+}
+func (m *TcpListenerPlugins) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_TcpListenerPlugins.Merge(m, src)
+}
+func (m *TcpListenerPlugins) XXX_Size() int {
+	return xxx_messageInfo_TcpListenerPlugins.Size(m)
+}
+func (m *TcpListenerPlugins) XXX_DiscardUnknown() {
+	xxx_messageInfo_TcpListenerPlugins.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_TcpListenerPlugins proto.InternalMessageInfo
+
+func (m *TcpListenerPlugins) GetTcpProxySettings() *tcp.TcpProxySettings {
+	if m != nil {
+		return m.TcpProxySettings
 	}
 	return nil
 }
@@ -94,9 +230,35 @@ func (m *ListenerPlugins) GetHttpConnectionManagerSettings() *hcm.HttpConnection
 // Note to developers: new Virtual Host Plugins must be added to this struct
 // to be usable by Gloo.
 type VirtualHostPlugins struct {
-	Extensions           *Extensions          `protobuf:"bytes,1,opt,name=extensions,proto3" json:"extensions,omitempty"`
-	Retries              *retries.RetryPolicy `protobuf:"bytes,5,opt,name=retries,proto3" json:"retries,omitempty"`
-	Stats                *stats.Stats         `protobuf:"bytes,10,opt,name=stats,proto3" json:"stats,omitempty"`
+	// Deprecated: Opaque config for Gloo plugins
+	Extensions *Extensions          `protobuf:"bytes,1,opt,name=extensions,proto3" json:"extensions,omitempty"` // Deprecated: Do not use.
+	Retries    *retries.RetryPolicy `protobuf:"bytes,5,opt,name=retries,proto3" json:"retries,omitempty"`
+	Stats      *stats.Stats         `protobuf:"bytes,10,opt,name=stats,proto3" json:"stats,omitempty"`
+	// Append/Remove headers on Requests or Responses on all routes contained in this Virtual Host
+	HeaderManipulation *headers.HeaderManipulation `protobuf:"bytes,2,opt,name=header_manipulation,json=headerManipulation,proto3" json:"header_manipulation,omitempty"`
+	// Defines a CORS policy for the virtual host
+	// If a CORS policy is also defined on the route matched by the request, the policies are merged.
+	Cors *cors.CorsPolicy `protobuf:"bytes,3,opt,name=cors,proto3" json:"cors,omitempty"`
+	// Transformations to apply
+	Transformations *transformation.RouteTransformations `protobuf:"bytes,4,opt,name=transformations,proto3" json:"transformations,omitempty"`
+	// Enterprise-only: Config for GlooE rate-limiting using simplified (gloo-specific) API
+	RatelimitBasic *ratelimit.IngressRateLimit `protobuf:"bytes,6,opt,name=ratelimit_basic,json=ratelimitBasic,proto3" json:"ratelimit_basic,omitempty"`
+	// Enterprise-only: Partial config for GlooE rate-limiting based on Envoy's rate-limit service;
+	// supports Envoy's rate-limit service API. (reference here: https://github.com/lyft/ratelimit#configuration)
+	// Configure rate-limit *actions* here, which define how request characteristics get translated into
+	// descriptors used by the rate-limit service for rate-limiting. Configure rate-limit *descriptors* and
+	// their associated limits on the Gloo settings
+	Ratelimit *ratelimit.RateLimitVhostExtension `protobuf:"bytes,7,opt,name=ratelimit,proto3" json:"ratelimit,omitempty"`
+	// Enterprise-only: Config for Web Application Firewall (WAF), supporting
+	// the popular ModSecurity 3.0 ruleset
+	Waf *waf.Settings `protobuf:"bytes,8,opt,name=waf,proto3" json:"waf,omitempty"`
+	// Enterprise-only: Config for reading and verifying JWTs. Copy verifiable information from JWTs into other
+	// headers to make routing decisions or combine with RBAC for fine-grained access control.
+	Jwt *jwt.VhostExtension `protobuf:"bytes,9,opt,name=jwt,proto3" json:"jwt,omitempty"`
+	// Enterprise-only: Config for RBAC (currently only supports RBAC based on JWT claims)
+	Rbac *rbac.ExtensionSettings `protobuf:"bytes,11,opt,name=rbac,proto3" json:"rbac,omitempty"`
+	// Enterprise-only: Authentication configuration
+	Extauth              *v1.ExtAuthExtension `protobuf:"bytes,12,opt,name=extauth,proto3" json:"extauth,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}             `json:"-"`
 	XXX_unrecognized     []byte               `json:"-"`
 	XXX_sizecache        int32                `json:"-"`
@@ -106,7 +268,7 @@ func (m *VirtualHostPlugins) Reset()         { *m = VirtualHostPlugins{} }
 func (m *VirtualHostPlugins) String() string { return proto.CompactTextString(m) }
 func (*VirtualHostPlugins) ProtoMessage()    {}
 func (*VirtualHostPlugins) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ae47d2df5fad2a45, []int{1}
+	return fileDescriptor_ae47d2df5fad2a45, []int{3}
 }
 func (m *VirtualHostPlugins) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_VirtualHostPlugins.Unmarshal(m, b)
@@ -126,6 +288,7 @@ func (m *VirtualHostPlugins) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_VirtualHostPlugins proto.InternalMessageInfo
 
+// Deprecated: Do not use.
 func (m *VirtualHostPlugins) GetExtensions() *Extensions {
 	if m != nil {
 		return m.Extensions
@@ -147,27 +310,128 @@ func (m *VirtualHostPlugins) GetStats() *stats.Stats {
 	return nil
 }
 
+func (m *VirtualHostPlugins) GetHeaderManipulation() *headers.HeaderManipulation {
+	if m != nil {
+		return m.HeaderManipulation
+	}
+	return nil
+}
+
+func (m *VirtualHostPlugins) GetCors() *cors.CorsPolicy {
+	if m != nil {
+		return m.Cors
+	}
+	return nil
+}
+
+func (m *VirtualHostPlugins) GetTransformations() *transformation.RouteTransformations {
+	if m != nil {
+		return m.Transformations
+	}
+	return nil
+}
+
+func (m *VirtualHostPlugins) GetRatelimitBasic() *ratelimit.IngressRateLimit {
+	if m != nil {
+		return m.RatelimitBasic
+	}
+	return nil
+}
+
+func (m *VirtualHostPlugins) GetRatelimit() *ratelimit.RateLimitVhostExtension {
+	if m != nil {
+		return m.Ratelimit
+	}
+	return nil
+}
+
+func (m *VirtualHostPlugins) GetWaf() *waf.Settings {
+	if m != nil {
+		return m.Waf
+	}
+	return nil
+}
+
+func (m *VirtualHostPlugins) GetJwt() *jwt.VhostExtension {
+	if m != nil {
+		return m.Jwt
+	}
+	return nil
+}
+
+func (m *VirtualHostPlugins) GetRbac() *rbac.ExtensionSettings {
+	if m != nil {
+		return m.Rbac
+	}
+	return nil
+}
+
+func (m *VirtualHostPlugins) GetExtauth() *v1.ExtAuthExtension {
+	if m != nil {
+		return m.Extauth
+	}
+	return nil
+}
+
 // Plugin-specific configuration that lives on routes
 // Each RoutePlugin object contains configuration for a specific plugin
 // Note to developers: new Route Plugins must be added to this struct
 // to be usable by Gloo.
 type RoutePlugins struct {
-	Transformations      *transformation.RouteTransformations `protobuf:"bytes,1,opt,name=transformations,proto3" json:"transformations,omitempty"`
-	Faults               *faultinjection.RouteFaults          `protobuf:"bytes,2,opt,name=faults,proto3" json:"faults,omitempty"`
-	PrefixRewrite        *transformation.PrefixRewrite        `protobuf:"bytes,3,opt,name=prefix_rewrite,json=prefixRewrite,proto3" json:"prefix_rewrite,omitempty"`
-	Timeout              *time.Duration                       `protobuf:"bytes,4,opt,name=timeout,proto3,stdduration" json:"timeout,omitempty"`
-	Retries              *retries.RetryPolicy                 `protobuf:"bytes,5,opt,name=retries,proto3" json:"retries,omitempty"`
-	Extensions           *Extensions                          `protobuf:"bytes,6,opt,name=extensions,proto3" json:"extensions,omitempty"`
-	XXX_NoUnkeyedLiteral struct{}                             `json:"-"`
-	XXX_unrecognized     []byte                               `json:"-"`
-	XXX_sizecache        int32                                `json:"-"`
+	// Transformations to apply
+	Transformations *transformation.RouteTransformations `protobuf:"bytes,1,opt,name=transformations,proto3" json:"transformations,omitempty"`
+	Faults          *faultinjection.RouteFaults          `protobuf:"bytes,2,opt,name=faults,proto3" json:"faults,omitempty"`
+	PrefixRewrite   *transformation1.PrefixRewrite       `protobuf:"bytes,3,opt,name=prefix_rewrite,json=prefixRewrite,proto3" json:"prefix_rewrite,omitempty"`
+	Timeout         *time.Duration                       `protobuf:"bytes,4,opt,name=timeout,proto3,stdduration" json:"timeout,omitempty"`
+	Retries         *retries.RetryPolicy                 `protobuf:"bytes,5,opt,name=retries,proto3" json:"retries,omitempty"`
+	// Deprecated: Opaque config for Gloo plugins
+	Extensions *Extensions `protobuf:"bytes,6,opt,name=extensions,proto3" json:"extensions,omitempty"` // Deprecated: Do not use.
+	// Defines route-specific tracing configuration.
+	// See here for additional information on Envoy's tracing capabilities: https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/observability/tracing.html
+	// See here for additional information about configuring tracing with Gloo: https://gloo.solo.io/user_guides/setup_options/observability/#tracing
+	Tracing *tracing.RouteTracingSettings `protobuf:"bytes,7,opt,name=tracing,proto3" json:"tracing,omitempty"`
+	// Specifies traffic shadowing configuration for the route.
+	// See here for additional information on Envoy's shadowing capabilities: https://www.envoyproxy.io/docs/envoy/latest/api-v2/api/v2/route/route.proto#envoy-api-msg-route-routeaction-requestmirrorpolicy
+	Shadowing *shadowing.RouteShadowing `protobuf:"bytes,8,opt,name=shadowing,proto3" json:"shadowing,omitempty"`
+	// Append/Remove headers on Requests or Responses on this Route
+	HeaderManipulation *headers.HeaderManipulation `protobuf:"bytes,9,opt,name=header_manipulation,json=headerManipulation,proto3" json:"header_manipulation,omitempty"`
+	// Rewrite the Host header for requests matched on this route
+	HostRewrite *hostrewrite.HostRewrite `protobuf:"bytes,10,opt,name=host_rewrite,json=hostRewrite,proto3" json:"host_rewrite,omitempty"`
+	// Defines a CORS policy for the route
+	// If a CORS policy is also defined on the route's virtual host, the policies are merged.
+	Cors *cors.CorsPolicy `protobuf:"bytes,11,opt,name=cors,proto3" json:"cors,omitempty"`
+	// For routes served by a hashing load balancer, this defines the input to the hash key
+	// Gloo configures Envoy with the first available RouteActionHashConfig among the following ordered list of providers:
+	// - route, upstream, virtual service
+	LbHash *lbhash.RouteActionHashConfig `protobuf:"bytes,12,opt,name=lb_hash,json=lbHash,proto3" json:"lb_hash,omitempty"`
+	// Enterprise-only: Config for GlooE rate-limiting using simplified (gloo-specific) API
+	RatelimitBasic *ratelimit.IngressRateLimit `protobuf:"bytes,13,opt,name=ratelimit_basic,json=ratelimitBasic,proto3" json:"ratelimit_basic,omitempty"`
+	// Enterprise-only: Partial config for GlooE rate-limiting based on Envoy's rate-limit service;
+	// supports Envoy's rate-limit service API. (reference here: https://github.com/lyft/ratelimit#configuration)
+	// Configure rate-limit *actions* here, which define how request characteristics get translated into
+	// descriptors used by the rate-limit service for rate-limiting. Configure rate-limit *descriptors* and
+	// their associated limits on the Gloo settings
+	Ratelimit *ratelimit.RateLimitRouteExtension `protobuf:"bytes,14,opt,name=ratelimit,proto3" json:"ratelimit,omitempty"`
+	// Enterprise-only: Config for Web Application Firewall (WAF), supporting
+	// the popular ModSecurity 3.0 ruleset
+	Waf *waf.Settings `protobuf:"bytes,15,opt,name=waf,proto3" json:"waf,omitempty"`
+	// Enterprise-only: Config for reading and verifying JWTs. Copy verifiable information from JWTs into other
+	// headers to make routing decisions or combine with RBAC for fine-grained access control.
+	Jwt *jwt.RouteExtension `protobuf:"bytes,16,opt,name=jwt,proto3" json:"jwt,omitempty"`
+	// Enterprise-only: Config for RBAC (currently only supports RBAC based on JWT claims)
+	Rbac *rbac.ExtensionSettings `protobuf:"bytes,17,opt,name=rbac,proto3" json:"rbac,omitempty"`
+	// Enterprise-only: Authentication configuration
+	Extauth              *v1.ExtAuthExtension `protobuf:"bytes,18,opt,name=extauth,proto3" json:"extauth,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}             `json:"-"`
+	XXX_unrecognized     []byte               `json:"-"`
+	XXX_sizecache        int32                `json:"-"`
 }
 
 func (m *RoutePlugins) Reset()         { *m = RoutePlugins{} }
 func (m *RoutePlugins) String() string { return proto.CompactTextString(m) }
 func (*RoutePlugins) ProtoMessage()    {}
 func (*RoutePlugins) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ae47d2df5fad2a45, []int{2}
+	return fileDescriptor_ae47d2df5fad2a45, []int{4}
 }
 func (m *RoutePlugins) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_RoutePlugins.Unmarshal(m, b)
@@ -201,7 +465,7 @@ func (m *RoutePlugins) GetFaults() *faultinjection.RouteFaults {
 	return nil
 }
 
-func (m *RoutePlugins) GetPrefixRewrite() *transformation.PrefixRewrite {
+func (m *RoutePlugins) GetPrefixRewrite() *transformation1.PrefixRewrite {
 	if m != nil {
 		return m.PrefixRewrite
 	}
@@ -222,9 +486,94 @@ func (m *RoutePlugins) GetRetries() *retries.RetryPolicy {
 	return nil
 }
 
+// Deprecated: Do not use.
 func (m *RoutePlugins) GetExtensions() *Extensions {
 	if m != nil {
 		return m.Extensions
+	}
+	return nil
+}
+
+func (m *RoutePlugins) GetTracing() *tracing.RouteTracingSettings {
+	if m != nil {
+		return m.Tracing
+	}
+	return nil
+}
+
+func (m *RoutePlugins) GetShadowing() *shadowing.RouteShadowing {
+	if m != nil {
+		return m.Shadowing
+	}
+	return nil
+}
+
+func (m *RoutePlugins) GetHeaderManipulation() *headers.HeaderManipulation {
+	if m != nil {
+		return m.HeaderManipulation
+	}
+	return nil
+}
+
+func (m *RoutePlugins) GetHostRewrite() *hostrewrite.HostRewrite {
+	if m != nil {
+		return m.HostRewrite
+	}
+	return nil
+}
+
+func (m *RoutePlugins) GetCors() *cors.CorsPolicy {
+	if m != nil {
+		return m.Cors
+	}
+	return nil
+}
+
+func (m *RoutePlugins) GetLbHash() *lbhash.RouteActionHashConfig {
+	if m != nil {
+		return m.LbHash
+	}
+	return nil
+}
+
+func (m *RoutePlugins) GetRatelimitBasic() *ratelimit.IngressRateLimit {
+	if m != nil {
+		return m.RatelimitBasic
+	}
+	return nil
+}
+
+func (m *RoutePlugins) GetRatelimit() *ratelimit.RateLimitRouteExtension {
+	if m != nil {
+		return m.Ratelimit
+	}
+	return nil
+}
+
+func (m *RoutePlugins) GetWaf() *waf.Settings {
+	if m != nil {
+		return m.Waf
+	}
+	return nil
+}
+
+func (m *RoutePlugins) GetJwt() *jwt.RouteExtension {
+	if m != nil {
+		return m.Jwt
+	}
+	return nil
+}
+
+func (m *RoutePlugins) GetRbac() *rbac.ExtensionSettings {
+	if m != nil {
+		return m.Rbac
+	}
+	return nil
+}
+
+func (m *RoutePlugins) GetExtauth() *v1.ExtAuthExtension {
+	if m != nil {
+		return m.Extauth
 	}
 	return nil
 }
@@ -249,7 +598,7 @@ func (m *DestinationSpec) Reset()         { *m = DestinationSpec{} }
 func (m *DestinationSpec) String() string { return proto.CompactTextString(m) }
 func (*DestinationSpec) ProtoMessage()    {}
 func (*DestinationSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ae47d2df5fad2a45, []int{3}
+	return fileDescriptor_ae47d2df5fad2a45, []int{5}
 }
 func (m *DestinationSpec) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_DestinationSpec.Unmarshal(m, b)
@@ -275,16 +624,16 @@ type isDestinationSpec_DestinationType interface {
 }
 
 type DestinationSpec_Aws struct {
-	Aws *aws.DestinationSpec `protobuf:"bytes,1,opt,name=aws,proto3,oneof"`
+	Aws *aws.DestinationSpec `protobuf:"bytes,1,opt,name=aws,proto3,oneof" json:"aws,omitempty"`
 }
 type DestinationSpec_Azure struct {
-	Azure *azure.DestinationSpec `protobuf:"bytes,2,opt,name=azure,proto3,oneof"`
+	Azure *azure.DestinationSpec `protobuf:"bytes,2,opt,name=azure,proto3,oneof" json:"azure,omitempty"`
 }
 type DestinationSpec_Rest struct {
-	Rest *rest.DestinationSpec `protobuf:"bytes,3,opt,name=rest,proto3,oneof"`
+	Rest *rest.DestinationSpec `protobuf:"bytes,3,opt,name=rest,proto3,oneof" json:"rest,omitempty"`
 }
 type DestinationSpec_Grpc struct {
-	Grpc *grpc.DestinationSpec `protobuf:"bytes,4,opt,name=grpc,proto3,oneof"`
+	Grpc *grpc.DestinationSpec `protobuf:"bytes,4,opt,name=grpc,proto3,oneof" json:"grpc,omitempty"`
 }
 
 func (*DestinationSpec_Aws) isDestinationSpec_DestinationType()   {}
@@ -327,9 +676,9 @@ func (m *DestinationSpec) GetGrpc() *grpc.DestinationSpec {
 	return nil
 }
 
-// XXX_OneofFuncs is for the internal use of the proto package.
-func (*DestinationSpec) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
-	return _DestinationSpec_OneofMarshaler, _DestinationSpec_OneofUnmarshaler, _DestinationSpec_OneofSizer, []interface{}{
+// XXX_OneofWrappers is for the internal use of the proto package.
+func (*DestinationSpec) XXX_OneofWrappers() []interface{} {
+	return []interface{}{
 		(*DestinationSpec_Aws)(nil),
 		(*DestinationSpec_Azure)(nil),
 		(*DestinationSpec_Rest)(nil),
@@ -337,127 +686,102 @@ func (*DestinationSpec) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffe
 	}
 }
 
-func _DestinationSpec_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
-	m := msg.(*DestinationSpec)
-	// destination_type
-	switch x := m.DestinationType.(type) {
-	case *DestinationSpec_Aws:
-		_ = b.EncodeVarint(1<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Aws); err != nil {
-			return err
-		}
-	case *DestinationSpec_Azure:
-		_ = b.EncodeVarint(2<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Azure); err != nil {
-			return err
-		}
-	case *DestinationSpec_Rest:
-		_ = b.EncodeVarint(3<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Rest); err != nil {
-			return err
-		}
-	case *DestinationSpec_Grpc:
-		_ = b.EncodeVarint(4<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Grpc); err != nil {
-			return err
-		}
-	case nil:
-	default:
-		return fmt.Errorf("DestinationSpec.DestinationType has unexpected type %T", x)
+// Plugin-specific configuration that is applied when a specific weighted destination
+// is selected for routing.
+type WeightedDestinationPlugins struct {
+	// Append/Remove headers on Requests or Responses to/from this Weighted Destination
+	HeaderManipulation *headers.HeaderManipulation `protobuf:"bytes,1,opt,name=header_manipulation,json=headerManipulation,proto3" json:"header_manipulation,omitempty"`
+	// Transformations to apply
+	Transformations *transformation.RouteTransformations `protobuf:"bytes,2,opt,name=transformations,proto3" json:"transformations,omitempty"`
+	// Deprecated: Opaque config for Gloo plugins
+	Extensions *Extensions `protobuf:"bytes,3,opt,name=extensions,proto3" json:"extensions,omitempty"` // Deprecated: Do not use.
+	// Enterprise-only: Authentication configuration
+	Extauth              *v1.ExtAuthExtension `protobuf:"bytes,4,opt,name=extauth,proto3" json:"extauth,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}             `json:"-"`
+	XXX_unrecognized     []byte               `json:"-"`
+	XXX_sizecache        int32                `json:"-"`
+}
+
+func (m *WeightedDestinationPlugins) Reset()         { *m = WeightedDestinationPlugins{} }
+func (m *WeightedDestinationPlugins) String() string { return proto.CompactTextString(m) }
+func (*WeightedDestinationPlugins) ProtoMessage()    {}
+func (*WeightedDestinationPlugins) Descriptor() ([]byte, []int) {
+	return fileDescriptor_ae47d2df5fad2a45, []int{6}
+}
+func (m *WeightedDestinationPlugins) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_WeightedDestinationPlugins.Unmarshal(m, b)
+}
+func (m *WeightedDestinationPlugins) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_WeightedDestinationPlugins.Marshal(b, m, deterministic)
+}
+func (m *WeightedDestinationPlugins) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_WeightedDestinationPlugins.Merge(m, src)
+}
+func (m *WeightedDestinationPlugins) XXX_Size() int {
+	return xxx_messageInfo_WeightedDestinationPlugins.Size(m)
+}
+func (m *WeightedDestinationPlugins) XXX_DiscardUnknown() {
+	xxx_messageInfo_WeightedDestinationPlugins.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_WeightedDestinationPlugins proto.InternalMessageInfo
+
+func (m *WeightedDestinationPlugins) GetHeaderManipulation() *headers.HeaderManipulation {
+	if m != nil {
+		return m.HeaderManipulation
 	}
 	return nil
 }
 
-func _DestinationSpec_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
-	m := msg.(*DestinationSpec)
-	switch tag {
-	case 1: // destination_type.aws
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(aws.DestinationSpec)
-		err := b.DecodeMessage(msg)
-		m.DestinationType = &DestinationSpec_Aws{msg}
-		return true, err
-	case 2: // destination_type.azure
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(azure.DestinationSpec)
-		err := b.DecodeMessage(msg)
-		m.DestinationType = &DestinationSpec_Azure{msg}
-		return true, err
-	case 3: // destination_type.rest
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(rest.DestinationSpec)
-		err := b.DecodeMessage(msg)
-		m.DestinationType = &DestinationSpec_Rest{msg}
-		return true, err
-	case 4: // destination_type.grpc
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(grpc.DestinationSpec)
-		err := b.DecodeMessage(msg)
-		m.DestinationType = &DestinationSpec_Grpc{msg}
-		return true, err
-	default:
-		return false, nil
+func (m *WeightedDestinationPlugins) GetTransformations() *transformation.RouteTransformations {
+	if m != nil {
+		return m.Transformations
 	}
+	return nil
 }
 
-func _DestinationSpec_OneofSizer(msg proto.Message) (n int) {
-	m := msg.(*DestinationSpec)
-	// destination_type
-	switch x := m.DestinationType.(type) {
-	case *DestinationSpec_Aws:
-		s := proto.Size(x.Aws)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *DestinationSpec_Azure:
-		s := proto.Size(x.Azure)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *DestinationSpec_Rest:
-		s := proto.Size(x.Rest)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *DestinationSpec_Grpc:
-		s := proto.Size(x.Grpc)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
+// Deprecated: Do not use.
+func (m *WeightedDestinationPlugins) GetExtensions() *Extensions {
+	if m != nil {
+		return m.Extensions
 	}
-	return n
+	return nil
+}
+
+func (m *WeightedDestinationPlugins) GetExtauth() *v1.ExtAuthExtension {
+	if m != nil {
+		return m.Extauth
+	}
+	return nil
 }
 
 // Each upstream in Gloo has a type. Supported types include `static`, `kubernetes`, `aws`, `consul`, and more.
 // Each upstream type is handled by a corresponding Gloo plugin.
 type UpstreamSpec struct {
-	SslConfig *UpstreamSslConfig `protobuf:"bytes,6,opt,name=ssl_config,json=sslConfig,proto3" json:"ssl_config,omitempty"`
+	SslConfig *UpstreamSslConfig `protobuf:"bytes,1,opt,name=ssl_config,json=sslConfig,proto3" json:"ssl_config,omitempty"`
 	// Circuit breakers for this upstream. if not set, the defaults ones from the Gloo settings will be used.
 	// if those are not set, [envoy's defaults](https://www.envoyproxy.io/docs/envoy/latest/api-v2/api/v2/cluster/circuit_breaker.proto#envoy-api-msg-cluster-circuitbreakers)
 	// will be used.
-	CircuitBreakers    *CircuitBreakerConfig `protobuf:"bytes,7,opt,name=circuit_breakers,json=circuitBreakers,proto3" json:"circuit_breakers,omitempty"`
-	LoadBalancerConfig *LoadBalancerConfig   `protobuf:"bytes,8,opt,name=load_balancer_config,json=loadBalancerConfig,proto3" json:"load_balancer_config,omitempty"`
-	ConnectionConfig   *ConnectionConfig     `protobuf:"bytes,9,opt,name=connection_config,json=connectionConfig,proto3" json:"connection_config,omitempty"`
+	CircuitBreakers    *CircuitBreakerConfig     `protobuf:"bytes,2,opt,name=circuit_breakers,json=circuitBreakers,proto3" json:"circuit_breakers,omitempty"`
+	LoadBalancerConfig *LoadBalancerConfig       `protobuf:"bytes,3,opt,name=load_balancer_config,json=loadBalancerConfig,proto3" json:"load_balancer_config,omitempty"`
+	ConnectionConfig   *ConnectionConfig         `protobuf:"bytes,4,opt,name=connection_config,json=connectionConfig,proto3" json:"connection_config,omitempty"`
+	HealthChecks       []*core.HealthCheck       `protobuf:"bytes,5,rep,name=health_checks,json=healthChecks,proto3" json:"health_checks,omitempty"`
+	OutlierDetection   *cluster.OutlierDetection `protobuf:"bytes,6,opt,name=outlier_detection,json=outlierDetection,proto3" json:"outlier_detection,omitempty"`
+	// Use http2 when communicating with this upstream
+	// this field is evaluated `true` for upstreams
+	// with a grpc service spec
+	UseHttp2 bool `protobuf:"varint,7,opt,name=use_http2,json=useHttp2,proto3" json:"use_http2,omitempty"`
 	// Note to developers: new Upstream Plugins must be added to this oneof field
 	// to be usable by Gloo.
 	//
 	// Types that are valid to be assigned to UpstreamType:
 	//	*UpstreamSpec_Kube
 	//	*UpstreamSpec_Static
+	//	*UpstreamSpec_Pipe
 	//	*UpstreamSpec_Aws
 	//	*UpstreamSpec_Azure
 	//	*UpstreamSpec_Consul
+	//	*UpstreamSpec_AwsEc2
 	UpstreamType         isUpstreamSpec_UpstreamType `protobuf_oneof:"upstream_type"`
 	XXX_NoUnkeyedLiteral struct{}                    `json:"-"`
 	XXX_unrecognized     []byte                      `json:"-"`
@@ -468,7 +792,7 @@ func (m *UpstreamSpec) Reset()         { *m = UpstreamSpec{} }
 func (m *UpstreamSpec) String() string { return proto.CompactTextString(m) }
 func (*UpstreamSpec) ProtoMessage()    {}
 func (*UpstreamSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ae47d2df5fad2a45, []int{4}
+	return fileDescriptor_ae47d2df5fad2a45, []int{7}
 }
 func (m *UpstreamSpec) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_UpstreamSpec.Unmarshal(m, b)
@@ -494,26 +818,34 @@ type isUpstreamSpec_UpstreamType interface {
 }
 
 type UpstreamSpec_Kube struct {
-	Kube *kubernetes.UpstreamSpec `protobuf:"bytes,1,opt,name=kube,proto3,oneof"`
+	Kube *kubernetes.UpstreamSpec `protobuf:"bytes,8,opt,name=kube,proto3,oneof" json:"kube,omitempty"`
 }
 type UpstreamSpec_Static struct {
-	Static *static.UpstreamSpec `protobuf:"bytes,4,opt,name=static,proto3,oneof"`
+	Static *static.UpstreamSpec `protobuf:"bytes,9,opt,name=static,proto3,oneof" json:"static,omitempty"`
+}
+type UpstreamSpec_Pipe struct {
+	Pipe *pipe.UpstreamSpec `protobuf:"bytes,10,opt,name=pipe,proto3,oneof" json:"pipe,omitempty"`
 }
 type UpstreamSpec_Aws struct {
-	Aws *aws.UpstreamSpec `protobuf:"bytes,2,opt,name=aws,proto3,oneof"`
+	Aws *aws.UpstreamSpec `protobuf:"bytes,11,opt,name=aws,proto3,oneof" json:"aws,omitempty"`
 }
 type UpstreamSpec_Azure struct {
-	Azure *azure.UpstreamSpec `protobuf:"bytes,3,opt,name=azure,proto3,oneof"`
+	Azure *azure.UpstreamSpec `protobuf:"bytes,12,opt,name=azure,proto3,oneof" json:"azure,omitempty"`
 }
 type UpstreamSpec_Consul struct {
-	Consul *consul.UpstreamSpec `protobuf:"bytes,5,opt,name=consul,proto3,oneof"`
+	Consul *consul.UpstreamSpec `protobuf:"bytes,13,opt,name=consul,proto3,oneof" json:"consul,omitempty"`
+}
+type UpstreamSpec_AwsEc2 struct {
+	AwsEc2 *ec2.UpstreamSpec `protobuf:"bytes,14,opt,name=aws_ec2,json=awsEc2,proto3,oneof" json:"aws_ec2,omitempty"`
 }
 
 func (*UpstreamSpec_Kube) isUpstreamSpec_UpstreamType()   {}
 func (*UpstreamSpec_Static) isUpstreamSpec_UpstreamType() {}
+func (*UpstreamSpec_Pipe) isUpstreamSpec_UpstreamType()   {}
 func (*UpstreamSpec_Aws) isUpstreamSpec_UpstreamType()    {}
 func (*UpstreamSpec_Azure) isUpstreamSpec_UpstreamType()  {}
 func (*UpstreamSpec_Consul) isUpstreamSpec_UpstreamType() {}
+func (*UpstreamSpec_AwsEc2) isUpstreamSpec_UpstreamType() {}
 
 func (m *UpstreamSpec) GetUpstreamType() isUpstreamSpec_UpstreamType {
 	if m != nil {
@@ -550,6 +882,27 @@ func (m *UpstreamSpec) GetConnectionConfig() *ConnectionConfig {
 	return nil
 }
 
+func (m *UpstreamSpec) GetHealthChecks() []*core.HealthCheck {
+	if m != nil {
+		return m.HealthChecks
+	}
+	return nil
+}
+
+func (m *UpstreamSpec) GetOutlierDetection() *cluster.OutlierDetection {
+	if m != nil {
+		return m.OutlierDetection
+	}
+	return nil
+}
+
+func (m *UpstreamSpec) GetUseHttp2() bool {
+	if m != nil {
+		return m.UseHttp2
+	}
+	return false
+}
+
 func (m *UpstreamSpec) GetKube() *kubernetes.UpstreamSpec {
 	if x, ok := m.GetUpstreamType().(*UpstreamSpec_Kube); ok {
 		return x.Kube
@@ -560,6 +913,13 @@ func (m *UpstreamSpec) GetKube() *kubernetes.UpstreamSpec {
 func (m *UpstreamSpec) GetStatic() *static.UpstreamSpec {
 	if x, ok := m.GetUpstreamType().(*UpstreamSpec_Static); ok {
 		return x.Static
+	}
+	return nil
+}
+
+func (m *UpstreamSpec) GetPipe() *pipe.UpstreamSpec {
+	if x, ok := m.GetUpstreamType().(*UpstreamSpec_Pipe); ok {
+		return x.Pipe
 	}
 	return nil
 }
@@ -585,142 +945,34 @@ func (m *UpstreamSpec) GetConsul() *consul.UpstreamSpec {
 	return nil
 }
 
-// XXX_OneofFuncs is for the internal use of the proto package.
-func (*UpstreamSpec) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
-	return _UpstreamSpec_OneofMarshaler, _UpstreamSpec_OneofUnmarshaler, _UpstreamSpec_OneofSizer, []interface{}{
-		(*UpstreamSpec_Kube)(nil),
-		(*UpstreamSpec_Static)(nil),
-		(*UpstreamSpec_Aws)(nil),
-		(*UpstreamSpec_Azure)(nil),
-		(*UpstreamSpec_Consul)(nil),
-	}
-}
-
-func _UpstreamSpec_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
-	m := msg.(*UpstreamSpec)
-	// upstream_type
-	switch x := m.UpstreamType.(type) {
-	case *UpstreamSpec_Kube:
-		_ = b.EncodeVarint(1<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Kube); err != nil {
-			return err
-		}
-	case *UpstreamSpec_Static:
-		_ = b.EncodeVarint(4<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Static); err != nil {
-			return err
-		}
-	case *UpstreamSpec_Aws:
-		_ = b.EncodeVarint(2<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Aws); err != nil {
-			return err
-		}
-	case *UpstreamSpec_Azure:
-		_ = b.EncodeVarint(3<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Azure); err != nil {
-			return err
-		}
-	case *UpstreamSpec_Consul:
-		_ = b.EncodeVarint(5<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.Consul); err != nil {
-			return err
-		}
-	case nil:
-	default:
-		return fmt.Errorf("UpstreamSpec.UpstreamType has unexpected type %T", x)
+func (m *UpstreamSpec) GetAwsEc2() *ec2.UpstreamSpec {
+	if x, ok := m.GetUpstreamType().(*UpstreamSpec_AwsEc2); ok {
+		return x.AwsEc2
 	}
 	return nil
 }
 
-func _UpstreamSpec_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
-	m := msg.(*UpstreamSpec)
-	switch tag {
-	case 1: // upstream_type.kube
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(kubernetes.UpstreamSpec)
-		err := b.DecodeMessage(msg)
-		m.UpstreamType = &UpstreamSpec_Kube{msg}
-		return true, err
-	case 4: // upstream_type.static
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(static.UpstreamSpec)
-		err := b.DecodeMessage(msg)
-		m.UpstreamType = &UpstreamSpec_Static{msg}
-		return true, err
-	case 2: // upstream_type.aws
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(aws.UpstreamSpec)
-		err := b.DecodeMessage(msg)
-		m.UpstreamType = &UpstreamSpec_Aws{msg}
-		return true, err
-	case 3: // upstream_type.azure
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(azure.UpstreamSpec)
-		err := b.DecodeMessage(msg)
-		m.UpstreamType = &UpstreamSpec_Azure{msg}
-		return true, err
-	case 5: // upstream_type.consul
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(consul.UpstreamSpec)
-		err := b.DecodeMessage(msg)
-		m.UpstreamType = &UpstreamSpec_Consul{msg}
-		return true, err
-	default:
-		return false, nil
+// XXX_OneofWrappers is for the internal use of the proto package.
+func (*UpstreamSpec) XXX_OneofWrappers() []interface{} {
+	return []interface{}{
+		(*UpstreamSpec_Kube)(nil),
+		(*UpstreamSpec_Static)(nil),
+		(*UpstreamSpec_Pipe)(nil),
+		(*UpstreamSpec_Aws)(nil),
+		(*UpstreamSpec_Azure)(nil),
+		(*UpstreamSpec_Consul)(nil),
+		(*UpstreamSpec_AwsEc2)(nil),
 	}
-}
-
-func _UpstreamSpec_OneofSizer(msg proto.Message) (n int) {
-	m := msg.(*UpstreamSpec)
-	// upstream_type
-	switch x := m.UpstreamType.(type) {
-	case *UpstreamSpec_Kube:
-		s := proto.Size(x.Kube)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *UpstreamSpec_Static:
-		s := proto.Size(x.Static)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *UpstreamSpec_Aws:
-		s := proto.Size(x.Aws)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *UpstreamSpec_Azure:
-		s := proto.Size(x.Azure)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *UpstreamSpec_Consul:
-		s := proto.Size(x.Consul)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
-	}
-	return n
 }
 
 func init() {
 	proto.RegisterType((*ListenerPlugins)(nil), "gloo.solo.io.ListenerPlugins")
+	proto.RegisterType((*HttpListenerPlugins)(nil), "gloo.solo.io.HttpListenerPlugins")
+	proto.RegisterType((*TcpListenerPlugins)(nil), "gloo.solo.io.TcpListenerPlugins")
 	proto.RegisterType((*VirtualHostPlugins)(nil), "gloo.solo.io.VirtualHostPlugins")
 	proto.RegisterType((*RoutePlugins)(nil), "gloo.solo.io.RoutePlugins")
 	proto.RegisterType((*DestinationSpec)(nil), "gloo.solo.io.DestinationSpec")
+	proto.RegisterType((*WeightedDestinationPlugins)(nil), "gloo.solo.io.WeightedDestinationPlugins")
 	proto.RegisterType((*UpstreamSpec)(nil), "gloo.solo.io.UpstreamSpec")
 }
 
@@ -729,69 +981,121 @@ func init() {
 }
 
 var fileDescriptor_ae47d2df5fad2a45 = []byte{
-	// 984 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xac, 0x96, 0x4d, 0x73, 0xdc, 0x34,
-	0x18, 0xc7, 0xd9, 0xbc, 0x6c, 0x5a, 0x91, 0xb2, 0x41, 0xd3, 0xc3, 0x92, 0x81, 0x34, 0xec, 0x01,
-	0x9a, 0x32, 0x95, 0x21, 0xcc, 0xb4, 0xd0, 0x99, 0x42, 0xd8, 0x0d, 0x25, 0x03, 0xe9, 0x90, 0x71,
-	0x78, 0x29, 0x5c, 0x76, 0xb4, 0x8a, 0xd6, 0x51, 0xe3, 0xb5, 0x3c, 0x92, 0x9c, 0x34, 0x9c, 0xf8,
-	0x18, 0x1c, 0xf8, 0x00, 0x5c, 0xf8, 0x0a, 0x7c, 0x02, 0xee, 0x1c, 0x99, 0xe1, 0x93, 0x30, 0x92,
-	0x1e, 0x3b, 0xb6, 0x59, 0x3a, 0xbb, 0xde, 0x1c, 0xd6, 0x2b, 0x5b, 0xcf, 0xff, 0x67, 0x49, 0xcf,
-	0x5f, 0x7a, 0x8c, 0x1e, 0x45, 0xc2, 0x9c, 0x66, 0x23, 0xc2, 0xe4, 0x24, 0xd0, 0x32, 0x96, 0xf7,
-	0x85, 0x0c, 0xa2, 0x58, 0xca, 0x20, 0x55, 0xf2, 0x39, 0x67, 0x46, 0xfb, 0x3b, 0x9a, 0x8a, 0xe0,
-	0xfc, 0x83, 0x20, 0x8d, 0xb3, 0x48, 0x24, 0x9a, 0xa4, 0x4a, 0x1a, 0x89, 0xd7, 0x6d, 0x17, 0xb1,
-	0x2a, 0x22, 0xe4, 0xe6, 0x9b, 0x91, 0x94, 0x51, 0xcc, 0x03, 0xd7, 0x37, 0xca, 0xc6, 0x81, 0x36,
-	0x2a, 0x63, 0xc6, 0xc7, 0x6e, 0xde, 0x8e, 0x64, 0x24, 0x5d, 0x33, 0xb0, 0x2d, 0x78, 0xfa, 0x60,
-	0xae, 0xb7, 0x6b, 0x1d, 0x83, 0xee, 0xf1, 0x5c, 0x3a, 0xfe, 0xc2, 0xf0, 0x44, 0x0b, 0x99, 0x0f,
-	0x7c, 0xb3, 0x3f, 0x97, 0x9c, 0x09, 0xc5, 0x32, 0x61, 0x86, 0x23, 0xc5, 0xe9, 0x19, 0x57, 0xc0,
-	0xd8, 0x9b, 0x8b, 0x11, 0x4b, 0x7a, 0x32, 0x1c, 0xd1, 0x98, 0x26, 0xac, 0x20, 0xcc, 0x37, 0x09,
-	0x26, 0x93, 0x84, 0x33, 0x23, 0x64, 0xd2, 0x68, 0x12, 0x90, 0xb9, 0x80, 0x5e, 0xb8, 0x1f, 0x30,
-	0xf6, 0x1b, 0x31, 0x14, 0xd7, 0xc6, 0x5d, 0x16, 0xa2, 0x44, 0x2a, 0x65, 0xee, 0x02, 0x94, 0xc3,
-	0xc6, 0x94, 0xe1, 0x05, 0x1f, 0x15, 0x8d, 0x85, 0x56, 0xe7, 0x94, 0x4d, 0xec, 0x0f, 0x18, 0x4f,
-	0x9a, 0xad, 0xf0, 0x4f, 0x99, 0xe2, 0xfe, 0x0a, 0x9c, 0x83, 0x46, 0x1c, 0x26, 0x13, 0x9d, 0xc5,
-	0xf0, 0x07, 0xa4, 0xa3, 0x46, 0xa4, 0xb3, 0x6c, 0xc4, 0x55, 0xc2, 0x0d, 0x2f, 0x37, 0x81, 0xf8,
-	0x65, 0x43, 0x07, 0x18, 0x25, 0x78, 0xf1, 0xbf, 0xd0, 0x3c, 0xb5, 0xa1, 0x46, 0x30, 0xf8, 0x5b,
-	0x68, 0xe5, 0x2d, 0x02, 0xae, 0xc0, 0x79, 0xd6, 0x88, 0x63, 0x14, 0x4d, 0xf4, 0x58, 0xaa, 0x09,
-	0xb5, 0xdb, 0x2d, 0x48, 0x15, 0x1f, 0x8b, 0x17, 0x43, 0xc5, 0x2f, 0x94, 0x30, 0xfc, 0x3a, 0xc9,
-	0xd5, 0x5b, 0x20, 0x7f, 0xdd, 0x88, 0x3c, 0xa6, 0x59, 0x6c, 0x44, 0xf2, 0xdc, 0x1f, 0x11, 0xfe,
-	0x16, 0x80, 0x5b, 0xf5, 0x83, 0xf9, 0x24, 0x53, 0xa5, 0x17, 0xf6, 0xfe, 0x6a, 0xa1, 0xce, 0xa1,
-	0xd0, 0x86, 0x27, 0x5c, 0x1d, 0x79, 0x1c, 0xfe, 0x0c, 0xdd, 0xc8, 0x37, 0x54, 0xb7, 0xb5, 0xdd,
-	0xba, 0xfb, 0xea, 0xee, 0x3b, 0xe4, 0x6a, 0x87, 0x41, 0x15, 0x28, 0x1f, 0xff, 0xe4, 0x0b, 0x95,
-	0xb2, 0xef, 0xf9, 0x28, 0x5c, 0x8b, 0x7c, 0x03, 0xff, 0xdc, 0x42, 0xdb, 0xa7, 0xc6, 0xa4, 0xc3,
-	0xab, 0x93, 0x6b, 0x38, 0xa1, 0x09, 0x8d, 0xb8, 0x1a, 0x6a, 0x6e, 0x8c, 0x48, 0x22, 0xdd, 0x5d,
-	0x72, 0xec, 0x87, 0xc4, 0x6d, 0xba, 0x69, 0xd8, 0x03, 0x63, 0xd2, 0x41, 0x01, 0x78, 0xea, 0xf5,
-	0xc7, 0x20, 0x0f, 0xdf, 0x3a, 0x7d, 0x59, 0x77, 0xef, 0xcf, 0x16, 0xc2, 0xdf, 0x09, 0x65, 0x32,
-	0x1a, 0x1f, 0x48, 0x6d, 0xf2, 0xc9, 0x7d, 0x84, 0xd0, 0x55, 0x49, 0x80, 0xe9, 0x75, 0xab, 0xaf,
-	0xfd, 0xbc, 0xe8, 0x0f, 0x4b, 0xb1, 0x78, 0x80, 0xd6, 0xc0, 0xf2, 0xdd, 0x55, 0x27, 0xdb, 0x21,
-	0xc5, 0x16, 0x98, 0x36, 0xfa, 0x90, 0x1b, 0x75, 0x79, 0x24, 0x63, 0xc1, 0x2e, 0xc3, 0x5c, 0x89,
-	0x1f, 0xa2, 0x55, 0xe7, 0xd1, 0x2e, 0x72, 0x88, 0xb7, 0x09, 0x38, 0x76, 0x1a, 0xe0, 0xd8, 0x76,
-	0x85, 0x3e, 0xbe, 0xf7, 0xc7, 0x32, 0x5a, 0x0f, 0x65, 0x66, 0x78, 0x3e, 0x91, 0x67, 0xa8, 0x53,
-	0xb5, 0x50, 0x3e, 0x1b, 0x42, 0x78, 0x72, 0x2e, 0x2f, 0x09, 0x4d, 0x05, 0x39, 0xdf, 0x25, 0x63,
-	0x11, 0x1b, 0xae, 0x88, 0x5d, 0x2c, 0xe2, 0x00, 0xdf, 0x54, 0x55, 0x61, 0x1d, 0x83, 0x3f, 0x45,
-	0x6d, 0x67, 0xa1, 0x3c, 0x43, 0xef, 0x12, 0x70, 0xd4, 0xd4, 0x59, 0x5a, 0xe4, 0x13, 0x17, 0x1e,
-	0x82, 0x0c, 0xff, 0x80, 0x5e, 0xab, 0xee, 0x9b, 0xee, 0xb2, 0x03, 0xed, 0x92, 0xba, 0xe9, 0xa7,
-	0x11, 0x8f, 0x9c, 0x34, 0xf4, 0xca, 0xf0, 0x56, 0x5a, 0xbe, 0xc5, 0x1f, 0xa3, 0x35, 0x23, 0x26,
-	0x5c, 0x66, 0xa6, 0xbb, 0xe2, 0x98, 0x6f, 0x10, 0xef, 0x70, 0x92, 0x3b, 0x9c, 0xec, 0x83, 0xc3,
-	0xfb, 0x2b, 0xbf, 0xfc, 0x7d, 0xa7, 0x15, 0xe6, 0xf1, 0xd7, 0x93, 0xbf, 0xaa, 0x7d, 0xda, 0xb3,
-	0xdb, 0xa7, 0xf7, 0xfb, 0x12, 0xea, 0xec, 0x73, 0x6d, 0x44, 0xe2, 0x46, 0x77, 0x9c, 0x72, 0x86,
-	0x1f, 0xa3, 0x65, 0x7a, 0x91, 0xe7, 0x6d, 0x87, 0xb8, 0xda, 0x3c, 0x6d, 0x28, 0x35, 0xdd, 0xc1,
-	0x2b, 0xa1, 0xd5, 0xe1, 0x01, 0x5a, 0x75, 0xa5, 0x06, 0xf2, 0xf4, 0x1e, 0x81, 0xc2, 0x33, 0x1b,
-	0xc2, 0x6b, 0xf1, 0x1e, 0x5a, 0xb1, 0xe5, 0x1c, 0x52, 0x74, 0x8f, 0xf8, 0xda, 0x3e, 0x1b, 0xc2,
-	0x29, 0x2d, 0xc1, 0xee, 0x7b, 0x48, 0xc8, 0x3d, 0xe2, 0xeb, 0xfa, 0x8c, 0x04, 0x1b, 0xdc, 0xc7,
-	0x68, 0xe3, 0xe4, 0xaa, 0x6b, 0x68, 0x2e, 0x53, 0xde, 0xfb, 0x75, 0x15, 0xad, 0x7f, 0x9b, 0x6a,
-	0xa3, 0x38, 0x9d, 0xb8, 0xc5, 0xfa, 0x04, 0x21, 0xad, 0x63, 0x7b, 0xa2, 0x8c, 0x45, 0x04, 0x4b,
-	0x7f, 0xa7, 0xca, 0x2f, 0xe2, 0x75, 0x3c, 0x70, 0x61, 0xe1, 0x4d, 0x9d, 0x37, 0xf1, 0x53, 0xb4,
-	0x51, 0xfb, 0x9a, 0xd3, 0xdd, 0x35, 0x47, 0xe9, 0x55, 0x29, 0x03, 0x1f, 0xd5, 0xf7, 0x41, 0x00,
-	0xea, 0xb0, 0xca, 0x53, 0x8d, 0x43, 0x74, 0xbb, 0xf2, 0x61, 0x97, 0x0f, 0xec, 0x86, 0x43, 0x6e,
-	0x57, 0x91, 0x87, 0x92, 0x9e, 0xf4, 0x21, 0x10, 0x80, 0x38, 0xfe, 0xcf, 0x33, 0xfc, 0x15, 0x7a,
-	0xbd, 0x74, 0x60, 0x02, 0xf0, 0xa6, 0x03, 0x6e, 0xd5, 0xc6, 0x58, 0x84, 0x01, 0x6e, 0x83, 0xd5,
-	0x9e, 0xe0, 0x01, 0x5a, 0xb1, 0x15, 0x1f, 0xdc, 0x75, 0x9f, 0x94, 0xcb, 0xff, 0xb4, 0xe4, 0x94,
-	0x17, 0xdb, 0x66, 0xc6, 0xc6, 0xe3, 0x01, 0x6a, 0xfb, 0xe2, 0x0c, 0xd9, 0xdd, 0x21, 0x79, 0xad,
-	0x9e, 0x01, 0x01, 0x52, 0xfc, 0xc8, 0xdb, 0x7c, 0x09, 0x6a, 0xc9, 0xff, 0xda, 0xbc, 0x26, 0x77,
-	0x1e, 0xdf, 0xcb, 0x3d, 0xee, 0xfd, 0x79, 0xf7, 0x65, 0x1e, 0xaf, 0xe9, 0xc1, 0xe0, 0x03, 0xd4,
-	0xf6, 0xdf, 0x51, 0xc5, 0xb6, 0xcf, 0x3f, 0xab, 0x66, 0x99, 0x82, 0x8f, 0xed, 0x77, 0xd0, 0xad,
-	0x0c, 0x7a, 0x9c, 0x3d, 0xfb, 0x0f, 0x7e, 0xfb, 0x67, 0xab, 0xf5, 0xe3, 0xfb, 0xb3, 0xd5, 0xeb,
-	0xf4, 0x2c, 0x82, 0x9a, 0x3d, 0x6a, 0xbb, 0x73, 0xea, 0xc3, 0x7f, 0x03, 0x00, 0x00, 0xff, 0xff,
-	0x5c, 0xb1, 0x09, 0x7d, 0x7c, 0x0d, 0x00, 0x00,
+	// 1815 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xb4, 0x59, 0x41, 0x6f, 0xdc, 0xb8,
+	0x15, 0xee, 0xd8, 0x8e, 0x1d, 0xd3, 0x4e, 0xec, 0x70, 0x83, 0x62, 0x9a, 0xb6, 0xd9, 0x74, 0x80,
+	0xee, 0x6e, 0xd2, 0x86, 0xb3, 0x9d, 0x16, 0xbb, 0xd8, 0x45, 0xd3, 0x26, 0x33, 0xc9, 0xd6, 0xed,
+	0x3a, 0x5d, 0x43, 0xce, 0x6e, 0x92, 0x5e, 0x04, 0x0e, 0x87, 0x23, 0x31, 0x96, 0x45, 0x81, 0xa4,
+	0x32, 0x76, 0x4f, 0xfd, 0x19, 0xbd, 0xf6, 0xd6, 0x4b, 0x8f, 0xfd, 0x0b, 0xfd, 0x0f, 0x05, 0x0a,
+	0x14, 0xe8, 0x5f, 0xe8, 0x1f, 0x28, 0x48, 0x3d, 0x69, 0x34, 0xb2, 0x9c, 0x9d, 0x91, 0xdc, 0x83,
+	0x24, 0x8a, 0x7a, 0xef, 0xe3, 0x23, 0xf9, 0xf8, 0xbd, 0x47, 0x0a, 0x7d, 0x1e, 0x08, 0x13, 0xa6,
+	0x63, 0xc2, 0xe4, 0x69, 0x5f, 0xcb, 0x48, 0x3e, 0x14, 0xb2, 0x1f, 0x44, 0x52, 0xf6, 0x13, 0x25,
+	0xdf, 0x70, 0x66, 0x74, 0xf6, 0x46, 0x13, 0xd1, 0x7f, 0xfb, 0xb3, 0x7e, 0x12, 0xa5, 0x81, 0x88,
+	0x35, 0x49, 0x94, 0x34, 0x12, 0xef, 0xda, 0x4f, 0xc4, 0x6a, 0x11, 0x21, 0xef, 0xfc, 0x20, 0x90,
+	0x32, 0x88, 0x78, 0xdf, 0x7d, 0x1b, 0xa7, 0xd3, 0xbe, 0x36, 0x2a, 0x65, 0x26, 0x93, 0xbd, 0x73,
+	0x3b, 0x90, 0x81, 0x74, 0xc5, 0xbe, 0x2d, 0x41, 0xed, 0x27, 0x2b, 0xb5, 0xae, 0x75, 0x04, 0x7a,
+	0x8f, 0x56, 0xd2, 0xe3, 0x67, 0x86, 0xc7, 0x5a, 0xc8, 0xdc, 0xf0, 0x3b, 0xc3, 0x95, 0xd4, 0x99,
+	0x50, 0x2c, 0x15, 0xc6, 0x1f, 0x2b, 0x4e, 0x4f, 0xb8, 0x02, 0x8c, 0xc7, 0x2b, 0x61, 0x44, 0x92,
+	0x4e, 0xfc, 0x31, 0x8d, 0x68, 0xcc, 0x0a, 0x84, 0xd5, 0x3a, 0xc1, 0x64, 0x1c, 0x73, 0x66, 0x84,
+	0x8c, 0x1b, 0x75, 0x02, 0x66, 0xae, 0x4f, 0x67, 0xee, 0x02, 0x8c, 0xdf, 0x35, 0xc6, 0xe0, 0x6c,
+	0x60, 0x9f, 0x3e, 0x67, 0x03, 0xc0, 0x7a, 0xda, 0x08, 0x8b, 0x49, 0x95, 0xdd, 0x5a, 0xa1, 0x28,
+	0xae, 0x8d, 0xbb, 0xb5, 0x42, 0x09, 0x54, 0xc2, 0xdc, 0xad, 0xdd, 0x08, 0x47, 0xee, 0x02, 0x8c,
+	0xc3, 0xc6, 0x96, 0xf8, 0x33, 0x3e, 0x2e, 0x0a, 0xad, 0x2c, 0x0a, 0xd9, 0xa9, 0xbd, 0x00, 0xe3,
+	0xa0, 0x11, 0x46, 0x34, 0x0e, 0xa9, 0x0e, 0xe1, 0x01, 0x48, 0xbf, 0x6f, 0x84, 0xa4, 0x43, 0x3a,
+	0x91, 0x33, 0x11, 0x07, 0xf3, 0x52, 0xab, 0xde, 0x19, 0x96, 0xd8, 0xab, 0x95, 0x47, 0x1b, 0x45,
+	0x99, 0xb5, 0x08, 0x9e, 0x80, 0xf5, 0x45, 0xb3, 0xf9, 0xff, 0x63, 0xaa, 0x78, 0x76, 0x6f, 0x35,
+	0xe2, 0x4c, 0xc6, 0x3a, 0x8d, 0xe0, 0x01, 0x48, 0x47, 0x8d, 0x90, 0x4e, 0xd2, 0x31, 0x57, 0x31,
+	0x37, 0xbc, 0x5c, 0x6c, 0x35, 0x5e, 0x8a, 0x1b, 0x25, 0x78, 0xf1, 0x6c, 0xd5, 0x4f, 0x6d, 0xa8,
+	0x11, 0x0c, 0x1e, 0xad, 0xd6, 0x6f, 0x22, 0x12, 0xee, 0x6e, 0xad, 0xe6, 0xcf, 0x1a, 0x02, 0x77,
+	0xc0, 0x79, 0xd5, 0xd4, 0xa7, 0x62, 0x3d, 0x95, 0xea, 0x94, 0x5a, 0xd2, 0xee, 0x27, 0x8a, 0x4f,
+	0xc5, 0x99, 0xaf, 0xf8, 0x4c, 0x09, 0x93, 0x5b, 0xf8, 0x55, 0x23, 0xe4, 0x29, 0x4d, 0x23, 0x23,
+	0xe2, 0x37, 0x59, 0x38, 0xc8, 0x5e, 0x5b, 0x4d, 0x67, 0xc8, 0xe9, 0x84, 0xab, 0xe2, 0x09, 0x58,
+	0x5e, 0x53, 0xac, 0xc8, 0x84, 0x2c, 0xe4, 0xec, 0xa4, 0x5c, 0x6e, 0x87, 0x29, 0xb5, 0x81, 0x81,
+	0x2b, 0x97, 0x01, 0x33, 0x58, 0x1e, 0xd3, 0x66, 0x02, 0x2a, 0xa6, 0x51, 0x9f, 0xc7, 0x6f, 0xe5,
+	0x79, 0x29, 0x31, 0xa8, 0xce, 0xd6, 0xe2, 0x6b, 0x23, 0x3f, 0xe0, 0xb1, 0xe1, 0x2a, 0x51, 0x42,
+	0xf3, 0xa2, 0x1f, 0xfc, 0xcc, 0xd0, 0xd4, 0x84, 0x90, 0x93, 0xd8, 0x22, 0x20, 0x3f, 0x6f, 0x8b,
+	0xfc, 0x66, 0x66, 0xec, 0x05, 0x70, 0xaf, 0xdb, 0xc2, 0x29, 0x6a, 0x78, 0x24, 0x4e, 0x85, 0x99,
+	0x97, 0x1a, 0x79, 0x6c, 0x1d, 0xf4, 0x98, 0x32, 0x77, 0xbb, 0xaa, 0xae, 0xcf, 0xe8, 0xd4, 0x5e,
+	0x00, 0xe7, 0x37, 0x76, 0x06, 0xd7, 0xc2, 0xa0, 0xcf, 0xa2, 0x54, 0x1b, 0xae, 0xfa, 0x32, 0x35,
+	0x91, 0xe0, 0xca, 0x9f, 0x70, 0xb3, 0x90, 0x76, 0xbd, 0x6c, 0xdd, 0x80, 0x54, 0x1c, 0x56, 0x86,
+	0x5f, 0x5e, 0x1a, 0x77, 0xab, 0xf9, 0xf3, 0x24, 0x55, 0x25, 0xef, 0xeb, 0xfd, 0xbd, 0x83, 0xf6,
+	0x0e, 0x85, 0x36, 0x3c, 0xe6, 0xea, 0x28, 0xeb, 0x3b, 0x9e, 0xa0, 0xef, 0x52, 0xc6, 0xb8, 0xd6,
+	0x7e, 0x24, 0x83, 0x40, 0xc4, 0x81, 0xaf, 0xb9, 0x7a, 0x2b, 0x18, 0xef, 0x76, 0xee, 0x75, 0x3e,
+	0xda, 0x19, 0x10, 0xe2, 0x32, 0x11, 0xc8, 0xda, 0xcb, 0xe9, 0x3a, 0x79, 0xe2, 0xf4, 0x0e, 0x33,
+	0xb5, 0xe3, 0x4c, 0xcb, 0xbb, 0x4d, 0x6b, 0x6a, 0xf1, 0x2f, 0x11, 0x9a, 0xaf, 0x94, 0xee, 0x9a,
+	0x43, 0xee, 0x2e, 0xa2, 0x3d, 0x2b, 0xbe, 0x0f, 0xd7, 0xba, 0x1d, 0xaf, 0x24, 0xdf, 0xfb, 0xcb,
+	0x3a, 0x7a, 0xef, 0xc0, 0x98, 0xa4, 0x6a, 0xfb, 0x13, 0x74, 0x3d, 0xcf, 0x6e, 0xc0, 0xda, 0x0f,
+	0xc8, 0x3c, 0xdd, 0xa9, 0x33, 0xf9, 0x37, 0x2a, 0x61, 0x2f, 0xf9, 0xd8, 0xdb, 0x0a, 0xb2, 0x02,
+	0xfe, 0x53, 0x07, 0xdd, 0x0b, 0x8d, 0x49, 0xfc, 0x79, 0x72, 0xec, 0x9f, 0xd2, 0x98, 0x06, 0x5c,
+	0xf9, 0x9a, 0x1b, 0x23, 0xe2, 0x20, 0xb7, 0xf7, 0x53, 0xe2, 0x32, 0xa0, 0x3a, 0x58, 0x6b, 0xdc,
+	0xa8, 0x00, 0x78, 0x9e, 0xe9, 0x1f, 0x83, 0xba, 0xf7, 0xc3, 0xf0, 0x5d, 0x9f, 0xf1, 0x11, 0xda,
+	0x2d, 0xcf, 0x65, 0x77, 0xc3, 0xb5, 0xf6, 0x90, 0x2c, 0x50, 0x5f, 0x6d, 0xab, 0x4e, 0x60, 0x64,
+	0x05, 0xbc, 0x9d, 0x70, 0xfe, 0x52, 0x19, 0xed, 0xf5, 0xd5, 0x46, 0x1b, 0xff, 0x02, 0xad, 0xcf,
+	0xe8, 0xb4, 0x7b, 0xcd, 0xa9, 0xf5, 0x88, 0x5b, 0x18, 0x75, 0xcd, 0x17, 0xfd, 0xb3, 0xe2, 0xbd,
+	0x18, 0xe1, 0x17, 0xec, 0xc2, 0x0c, 0xbd, 0x42, 0xd8, 0xb0, 0xc4, 0x4f, 0x94, 0x3c, 0x3b, 0x9f,
+	0x8f, 0x67, 0x66, 0xd1, 0x03, 0xe2, 0x72, 0xae, 0x3a, 0xe8, 0x17, 0x2c, 0x39, 0xb2, 0x2a, 0x45,
+	0x13, 0xfb, 0xa6, 0x52, 0xd3, 0xfb, 0xef, 0x26, 0xc2, 0xdf, 0x08, 0x65, 0x52, 0x1a, 0x1d, 0x48,
+	0x6d, 0xf2, 0x06, 0x17, 0xbb, 0xde, 0x59, 0xb1, 0xeb, 0x23, 0xb4, 0x05, 0xf9, 0x08, 0x74, 0xff,
+	0x3e, 0x29, 0xf2, 0x93, 0x3a, 0x3b, 0x3d, 0x6e, 0xd4, 0xf9, 0x91, 0x8c, 0x04, 0x3b, 0xf7, 0x72,
+	0x4d, 0xfc, 0x29, 0xba, 0xe6, 0x42, 0x7f, 0x17, 0x39, 0x88, 0x1f, 0x11, 0x48, 0x04, 0x6a, 0xc7,
+	0xd0, 0x7e, 0xf2, 0x32, 0x79, 0x4c, 0xd1, 0x7b, 0x59, 0xf8, 0xb4, 0x1e, 0x28, 0x92, 0x34, 0x72,
+	0x6b, 0x17, 0xbc, 0xef, 0x63, 0x52, 0x84, 0xd6, 0x4b, 0x7c, 0x61, 0xc2, 0xd5, 0xf3, 0x92, 0x9e,
+	0x87, 0xc3, 0x0b, 0x75, 0xf8, 0x33, 0xb4, 0x61, 0x77, 0x4a, 0x30, 0x03, 0x3f, 0x26, 0xd9, 0xb6,
+	0xa9, 0x0e, 0x70, 0x24, 0x95, 0x86, 0x9e, 0x39, 0x15, 0xfc, 0x0a, 0xed, 0x2d, 0x86, 0x34, 0x0d,
+	0x9e, 0x4a, 0x88, 0x23, 0x27, 0x42, 0x13, 0x41, 0xde, 0x0e, 0xc8, 0x54, 0x44, 0x86, 0x2b, 0x62,
+	0x7d, 0x9e, 0x78, 0x32, 0x35, 0xfc, 0xc5, 0xa2, 0x96, 0x57, 0x85, 0xc1, 0xaf, 0xd1, 0x5e, 0x11,
+	0x23, 0xfc, 0x31, 0xd5, 0x82, 0x75, 0x37, 0xa1, 0xcf, 0xa5, 0xd8, 0x51, 0x67, 0xe4, 0x6f, 0xe3,
+	0x40, 0x71, 0xad, 0x3d, 0x6a, 0xf8, 0xa1, 0x95, 0xf2, 0x6e, 0x16, 0x0a, 0x43, 0x8b, 0x83, 0xbf,
+	0x46, 0xdb, 0x45, 0x4d, 0x77, 0x0b, 0x96, 0xf1, 0xb7, 0x80, 0x16, 0x68, 0xdf, 0xd8, 0x44, 0xa1,
+	0xf0, 0x16, 0x6f, 0x8e, 0x94, 0x2f, 0x91, 0xeb, 0x2b, 0x2d, 0x11, 0xfc, 0x39, 0x5a, 0x7f, 0x33,
+	0x33, 0xdd, 0x6d, 0xa7, 0xf5, 0x11, 0x71, 0xc1, 0xb6, 0x4e, 0xab, 0xd2, 0xae, 0x55, 0xc2, 0x8f,
+	0xd1, 0x86, 0x8d, 0x78, 0xdd, 0x1d, 0xa7, 0xfc, 0x53, 0x92, 0x85, 0xbf, 0x3a, 0xed, 0x42, 0xb1,
+	0x68, 0xdc, 0x69, 0x5a, 0xdf, 0x86, 0x8c, 0xa1, 0xbb, 0x0b, 0xbe, 0x3d, 0x0f, 0x85, 0x17, 0x20,
+	0x9e, 0xa4, 0x26, 0x9c, 0x9b, 0x90, 0x6b, 0xf6, 0xfe, 0x81, 0xd0, 0xae, 0x9b, 0xd4, 0xf9, 0x02,
+	0xbf, 0xe0, 0x15, 0x9d, 0xab, 0xf1, 0x8a, 0x5f, 0xa3, 0x4d, 0x97, 0x96, 0xe6, 0xf4, 0xfb, 0x21,
+	0x81, 0x2c, 0xb5, 0x76, 0xce, 0x2c, 0xe4, 0x17, 0x4e, 0xdc, 0x03, 0x35, 0xfc, 0x1a, 0xdd, 0x5c,
+	0xcc, 0x98, 0xc1, 0xeb, 0x07, 0xa4, 0x9a, 0x9a, 0xd5, 0x21, 0x1e, 0x39, 0x55, 0x2f, 0xd3, 0xf4,
+	0x6e, 0x24, 0xe5, 0x57, 0xfc, 0x19, 0xda, 0x32, 0xe2, 0x94, 0xcb, 0xd4, 0xc0, 0x1a, 0xf8, 0x1e,
+	0xc9, 0x42, 0x2f, 0xc9, 0x43, 0x2f, 0x79, 0x0a, 0xa1, 0x77, 0xb8, 0xf1, 0xe7, 0x7f, 0xbf, 0xdf,
+	0xf1, 0x72, 0xf9, 0xab, 0xa1, 0x98, 0x45, 0x96, 0xdb, 0x5c, 0x91, 0xe5, 0x0e, 0xd1, 0x16, 0xec,
+	0x52, 0x61, 0x49, 0xb8, 0x11, 0xc9, 0x76, 0xad, 0x97, 0x0e, 0xee, 0x8b, 0x4c, 0xa2, 0x70, 0xaa,
+	0x1c, 0x02, 0x1f, 0xa2, 0xed, 0x62, 0x17, 0x0e, 0x2b, 0x82, 0x90, 0xd2, 0xbe, 0xfc, 0x52, 0xc4,
+	0xe3, 0x5c, 0xc6, 0x9b, 0x03, 0x5c, 0xc6, 0x81, 0xdb, 0x57, 0xc8, 0x81, 0x36, 0xde, 0x4a, 0x6d,
+	0x0a, 0xaf, 0x40, 0x79, 0xbc, 0x2d, 0x6f, 0x0b, 0x6a, 0xf1, 0xa5, 0x36, 0xb9, 0x43, 0xec, 0x84,
+	0xf3, 0x97, 0x82, 0x55, 0x77, 0x56, 0x67, 0xd5, 0x2f, 0xd1, 0x56, 0x34, 0xf6, 0x43, 0xaa, 0xf3,
+	0x55, 0x39, 0x20, 0xf9, 0x01, 0xc9, 0xa5, 0x03, 0xf7, 0xc4, 0xa5, 0x11, 0x07, 0x54, 0x87, 0x23,
+	0x19, 0x4f, 0x45, 0xe0, 0x6d, 0x46, 0x63, 0xfb, 0x56, 0x47, 0xa4, 0x37, 0xfe, 0x1f, 0x44, 0x7a,
+	0x73, 0x45, 0x22, 0x75, 0x56, 0xbf, 0x8b, 0x48, 0xf7, 0x1a, 0x11, 0xe9, 0xfe, 0xb7, 0x11, 0x69,
+	0xa5, 0xdd, 0x05, 0x22, 0xbd, 0x75, 0x15, 0x44, 0x8a, 0x1b, 0x13, 0xe9, 0xdf, 0xd6, 0xd0, 0xde,
+	0x53, 0xae, 0x8d, 0x88, 0x9d, 0x53, 0x1e, 0x27, 0x9c, 0xe1, 0x47, 0x68, 0x9d, 0xce, 0x72, 0xfe,
+	0xbc, 0x4f, 0xdc, 0x19, 0x6b, 0x9d, 0x61, 0x15, 0xbd, 0x83, 0xef, 0x78, 0x56, 0x0f, 0x8f, 0xd0,
+	0x35, 0x77, 0x64, 0x04, 0x7c, 0xf9, 0x13, 0x02, 0x07, 0x48, 0xcb, 0x41, 0x64, 0xba, 0x6e, 0x78,
+	0xb8, 0x36, 0x45, 0x8a, 0x96, 0x9d, 0x88, 0x2e, 0x07, 0xe1, 0x34, 0x2d, 0x82, 0x4d, 0xae, 0x81,
+	0x18, 0x1f, 0x90, 0xec, 0x34, 0x74, 0x49, 0x04, 0x2b, 0x3c, 0xc4, 0x68, 0x7f, 0x32, 0xff, 0xe4,
+	0x9b, 0xf3, 0x84, 0xf7, 0xfe, 0xb5, 0x86, 0xee, 0xbc, 0xe4, 0x22, 0x08, 0x0d, 0x9f, 0x94, 0xf4,
+	0xf2, 0x30, 0x74, 0x09, 0x6d, 0x74, 0xae, 0x90, 0x36, 0x6a, 0x22, 0xdd, 0xda, 0xd5, 0x44, 0xba,
+	0x76, 0xe9, 0x7a, 0xc9, 0x1d, 0x37, 0x1a, 0xbb, 0xe3, 0x3f, 0xb7, 0xd0, 0xee, 0xd7, 0x89, 0xe5,
+	0x3f, 0x7a, 0xea, 0x7c, 0xf1, 0x57, 0x08, 0x69, 0x1d, 0xd9, 0x5d, 0xd1, 0x54, 0x04, 0x30, 0x8e,
+	0xef, 0x2f, 0xa2, 0x15, 0xf2, 0x3a, 0x02, 0x1e, 0xda, 0xd6, 0x79, 0x11, 0x3f, 0x47, 0xfb, 0x95,
+	0x9f, 0x1e, 0xf9, 0x70, 0xf5, 0x2a, 0x8c, 0x98, 0x49, 0x0d, 0x33, 0x21, 0x00, 0xda, 0x63, 0x0b,
+	0xb5, 0x1a, 0x7b, 0xe8, 0xf6, 0xc2, 0xff, 0x8f, 0xdc, 0xb0, 0x6c, 0xb0, 0xee, 0x2d, 0x42, 0x1e,
+	0x4a, 0x3a, 0x19, 0x82, 0x20, 0x00, 0xe2, 0xe8, 0x42, 0x1d, 0xfe, 0x12, 0xdd, 0x2a, 0x6d, 0xfa,
+	0x00, 0x30, 0x1b, 0xc2, 0xbb, 0x55, 0xd6, 0xce, 0xc5, 0x00, 0x6e, 0x9f, 0x55, 0x6a, 0xf0, 0x08,
+	0xdd, 0x28, 0x6f, 0xe2, 0x6c, 0x70, 0x5f, 0x77, 0x40, 0x0b, 0xbe, 0x61, 0x37, 0xee, 0x0b, 0xdb,
+	0xb6, 0xdd, 0xd2, 0xb6, 0x4d, 0xe3, 0x63, 0x74, 0xeb, 0xc2, 0x99, 0x01, 0x44, 0xf7, 0x0f, 0x2a,
+	0x40, 0xd9, 0x11, 0x03, 0xf9, 0x2a, 0x13, 0x7f, 0x9a, 0x4b, 0x7b, 0xfb, 0xb2, 0x52, 0x83, 0xbf,
+	0x8f, 0xb6, 0x53, 0xcd, 0x7d, 0xeb, 0x8f, 0x03, 0x17, 0xef, 0xaf, 0x7b, 0xd7, 0x53, 0xcd, 0xed,
+	0x96, 0x75, 0x80, 0x47, 0x68, 0xe3, 0x24, 0x1d, 0x73, 0x88, 0xdb, 0x0f, 0x49, 0xf9, 0x70, 0xb7,
+	0x6e, 0xad, 0x94, 0x7d, 0xc4, 0xae, 0x57, 0x2b, 0x8f, 0x47, 0x68, 0x33, 0x3b, 0x7a, 0x85, 0x30,
+	0x7d, 0x9f, 0xe4, 0x27, 0xb1, 0x4b, 0x40, 0x80, 0x2a, 0x7e, 0x84, 0x36, 0x12, 0x91, 0xe4, 0xd1,
+	0xf8, 0x43, 0x92, 0x1d, 0xc2, 0x2e, 0x63, 0x83, 0x95, 0xb4, 0x21, 0xc1, 0x72, 0xe7, 0x0e, 0x0c,
+	0xd6, 0xa5, 0xdc, 0x59, 0x51, 0x76, 0xc4, 0xf9, 0x38, 0x27, 0xce, 0x5d, 0x08, 0x28, 0xef, 0x20,
+	0xce, 0x8a, 0x3e, 0xb0, 0xe6, 0x08, 0x6d, 0x66, 0x87, 0xec, 0x10, 0x6f, 0xef, 0x93, 0xfc, 0xcc,
+	0x7d, 0x99, 0x11, 0xc8, 0x64, 0xf1, 0x33, 0xb4, 0x05, 0xbf, 0xc3, 0x20, 0xc0, 0x3e, 0x20, 0xc5,
+	0xef, 0xb1, 0x65, 0x60, 0xe8, 0x4c, 0x3f, 0x63, 0x83, 0xe1, 0x1e, 0xba, 0x91, 0xc2, 0x17, 0x47,
+	0x9d, 0xc3, 0x4f, 0xfe, 0xfa, 0x9f, 0xbb, 0x9d, 0x3f, 0x7c, 0xbc, 0xdc, 0xa1, 0x53, 0x72, 0x12,
+	0xc0, 0x41, 0xd9, 0x78, 0xd3, 0xe5, 0xb2, 0x3f, 0xff, 0x5f, 0x00, 0x00, 0x00, 0xff, 0xff, 0xca,
+	0x19, 0x93, 0xad, 0xe0, 0x1d, 0x00, 0x00,
 }
 
 func (this *ListenerPlugins) Equal(that interface{}) bool {
@@ -813,10 +1117,76 @@ func (this *ListenerPlugins) Equal(that interface{}) bool {
 	} else if this == nil {
 		return false
 	}
+	if !this.AccessLoggingService.Equal(that1.AccessLoggingService) {
+		return false
+	}
+	if !this.Extensions.Equal(that1.Extensions) {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *HttpListenerPlugins) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*HttpListenerPlugins)
+	if !ok {
+		that2, ok := that.(HttpListenerPlugins)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
 	if !this.GrpcWeb.Equal(that1.GrpcWeb) {
 		return false
 	}
 	if !this.HttpConnectionManagerSettings.Equal(that1.HttpConnectionManagerSettings) {
+		return false
+	}
+	if !this.HealthCheck.Equal(that1.HealthCheck) {
+		return false
+	}
+	if !this.Extensions.Equal(that1.Extensions) {
+		return false
+	}
+	if !this.Waf.Equal(that1.Waf) {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
+func (this *TcpListenerPlugins) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*TcpListenerPlugins)
+	if !ok {
+		that2, ok := that.(TcpListenerPlugins)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if !this.TcpProxySettings.Equal(that1.TcpProxySettings) {
 		return false
 	}
 	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
@@ -850,6 +1220,33 @@ func (this *VirtualHostPlugins) Equal(that interface{}) bool {
 		return false
 	}
 	if !this.Stats.Equal(that1.Stats) {
+		return false
+	}
+	if !this.HeaderManipulation.Equal(that1.HeaderManipulation) {
+		return false
+	}
+	if !this.Cors.Equal(that1.Cors) {
+		return false
+	}
+	if !this.Transformations.Equal(that1.Transformations) {
+		return false
+	}
+	if !this.RatelimitBasic.Equal(that1.RatelimitBasic) {
+		return false
+	}
+	if !this.Ratelimit.Equal(that1.Ratelimit) {
+		return false
+	}
+	if !this.Waf.Equal(that1.Waf) {
+		return false
+	}
+	if !this.Jwt.Equal(that1.Jwt) {
+		return false
+	}
+	if !this.Rbac.Equal(that1.Rbac) {
+		return false
+	}
+	if !this.Extauth.Equal(that1.Extauth) {
 		return false
 	}
 	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
@@ -898,6 +1295,42 @@ func (this *RoutePlugins) Equal(that interface{}) bool {
 		return false
 	}
 	if !this.Extensions.Equal(that1.Extensions) {
+		return false
+	}
+	if !this.Tracing.Equal(that1.Tracing) {
+		return false
+	}
+	if !this.Shadowing.Equal(that1.Shadowing) {
+		return false
+	}
+	if !this.HeaderManipulation.Equal(that1.HeaderManipulation) {
+		return false
+	}
+	if !this.HostRewrite.Equal(that1.HostRewrite) {
+		return false
+	}
+	if !this.Cors.Equal(that1.Cors) {
+		return false
+	}
+	if !this.LbHash.Equal(that1.LbHash) {
+		return false
+	}
+	if !this.RatelimitBasic.Equal(that1.RatelimitBasic) {
+		return false
+	}
+	if !this.Ratelimit.Equal(that1.Ratelimit) {
+		return false
+	}
+	if !this.Waf.Equal(that1.Waf) {
+		return false
+	}
+	if !this.Jwt.Equal(that1.Jwt) {
+		return false
+	}
+	if !this.Rbac.Equal(that1.Rbac) {
+		return false
+	}
+	if !this.Extauth.Equal(that1.Extauth) {
 		return false
 	}
 	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
@@ -1034,6 +1467,42 @@ func (this *DestinationSpec_Grpc) Equal(that interface{}) bool {
 	}
 	return true
 }
+func (this *WeightedDestinationPlugins) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*WeightedDestinationPlugins)
+	if !ok {
+		that2, ok := that.(WeightedDestinationPlugins)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if !this.HeaderManipulation.Equal(that1.HeaderManipulation) {
+		return false
+	}
+	if !this.Transformations.Equal(that1.Transformations) {
+		return false
+	}
+	if !this.Extensions.Equal(that1.Extensions) {
+		return false
+	}
+	if !this.Extauth.Equal(that1.Extauth) {
+		return false
+	}
+	if !bytes.Equal(this.XXX_unrecognized, that1.XXX_unrecognized) {
+		return false
+	}
+	return true
+}
 func (this *UpstreamSpec) Equal(that interface{}) bool {
 	if that == nil {
 		return this == nil
@@ -1063,6 +1532,20 @@ func (this *UpstreamSpec) Equal(that interface{}) bool {
 		return false
 	}
 	if !this.ConnectionConfig.Equal(that1.ConnectionConfig) {
+		return false
+	}
+	if len(this.HealthChecks) != len(that1.HealthChecks) {
+		return false
+	}
+	for i := range this.HealthChecks {
+		if !this.HealthChecks[i].Equal(that1.HealthChecks[i]) {
+			return false
+		}
+	}
+	if !this.OutlierDetection.Equal(that1.OutlierDetection) {
+		return false
+	}
+	if this.UseHttp2 != that1.UseHttp2 {
 		return false
 	}
 	if that1.UpstreamType == nil {
@@ -1123,6 +1606,30 @@ func (this *UpstreamSpec_Static) Equal(that interface{}) bool {
 		return false
 	}
 	if !this.Static.Equal(that1.Static) {
+		return false
+	}
+	return true
+}
+func (this *UpstreamSpec_Pipe) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*UpstreamSpec_Pipe)
+	if !ok {
+		that2, ok := that.(UpstreamSpec_Pipe)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if !this.Pipe.Equal(that1.Pipe) {
 		return false
 	}
 	return true
@@ -1195,6 +1702,30 @@ func (this *UpstreamSpec_Consul) Equal(that interface{}) bool {
 		return false
 	}
 	if !this.Consul.Equal(that1.Consul) {
+		return false
+	}
+	return true
+}
+func (this *UpstreamSpec_AwsEc2) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*UpstreamSpec_AwsEc2)
+	if !ok {
+		that2, ok := that.(UpstreamSpec_AwsEc2)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if !this.AwsEc2.Equal(that1.AwsEc2) {
 		return false
 	}
 	return true

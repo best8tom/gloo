@@ -3,6 +3,7 @@
 package v1
 
 import (
+	"log"
 	"sort"
 
 	"github.com/solo-io/go-utils/hashutils"
@@ -30,10 +31,16 @@ func (r *Ingress) SetMetadata(meta core.Metadata) {
 func (r *Ingress) Hash() uint64 {
 	metaCopy := r.GetMetadata()
 	metaCopy.ResourceVersion = ""
+	metaCopy.Generation = 0
+	// investigate zeroing out owner refs as well
 	return hashutils.HashAll(
 		metaCopy,
 		r.KubeIngressSpec,
 	)
+}
+
+func (r *Ingress) GroupVersionKind() schema.GroupVersionKind {
+	return IngressGVK
 }
 
 type IngressList []*Ingress
@@ -109,8 +116,6 @@ func (list IngressList) AsInterfaces() []interface{} {
 	return asInterfaces
 }
 
-var _ resources.Resource = &Ingress{}
-
 // Kubernetes Adapter for Ingress
 
 func (o *Ingress) GetObjectKind() schema.ObjectKind {
@@ -122,11 +127,32 @@ func (o *Ingress) DeepCopyObject() runtime.Object {
 	return resources.Clone(o).(*Ingress)
 }
 
-var IngressCrd = crd.NewCrd("ingress.solo.io",
-	"ingresses",
-	"ingress.solo.io",
-	"v1",
-	"Ingress",
-	"ig",
-	false,
-	&Ingress{})
+func (o *Ingress) DeepCopyInto(out *Ingress) {
+	clone := resources.Clone(o).(*Ingress)
+	*out = *clone
+}
+
+var (
+	IngressCrd = crd.NewCrd(
+		"ingresses",
+		IngressGVK.Group,
+		IngressGVK.Version,
+		IngressGVK.Kind,
+		"ig",
+		false,
+		&Ingress{})
+)
+
+func init() {
+	if err := crd.AddCrd(IngressCrd); err != nil {
+		log.Fatalf("could not add crd to global registry")
+	}
+}
+
+var (
+	IngressGVK = schema.GroupVersionKind{
+		Version: "v1",
+		Group:   "ingress.solo.io",
+		Kind:    "Ingress",
+	}
+)

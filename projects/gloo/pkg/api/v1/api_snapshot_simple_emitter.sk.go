@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	enterprise_gloo_solo_io "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/enterprise/plugins/extauth/v1"
+
 	"go.opencensus.io/stats"
 
 	"github.com/solo-io/go-utils/errutils"
@@ -45,16 +47,18 @@ func (c *apiSimpleEmitter) Snapshots(ctx context.Context) (<-chan *ApiSnapshot, 
 	go errutils.AggregateErrs(ctx, errs, watchErrs, "api-emitter")
 
 	go func() {
-		originalSnapshot := ApiSnapshot{}
-		currentSnapshot := originalSnapshot.Clone()
+		currentSnapshot := ApiSnapshot{}
 		timer := time.NewTicker(time.Second * 1)
+		var previousHash uint64
 		sync := func() {
-			if originalSnapshot.Hash() == currentSnapshot.Hash() {
+			currentHash := currentSnapshot.Hash()
+			if previousHash == currentHash {
 				return
 			}
 
+			previousHash = currentHash
+
 			stats.Record(ctx, mApiSnapshotOut.M(1))
-			originalSnapshot = currentSnapshot.Clone()
 			sentSnapshot := currentSnapshot.Clone()
 			snapshots <- &sentSnapshot
 		}
@@ -88,11 +92,13 @@ func (c *apiSimpleEmitter) Snapshots(ctx context.Context) (<-chan *ApiSnapshot, 
 					case *Proxy:
 						currentSnapshot.Proxies = append(currentSnapshot.Proxies, typed)
 					case *UpstreamGroup:
-						currentSnapshot.Upstreamgroups = append(currentSnapshot.Upstreamgroups, typed)
+						currentSnapshot.UpstreamGroups = append(currentSnapshot.UpstreamGroups, typed)
 					case *Secret:
 						currentSnapshot.Secrets = append(currentSnapshot.Secrets, typed)
 					case *Upstream:
 						currentSnapshot.Upstreams = append(currentSnapshot.Upstreams, typed)
+					case *enterprise_gloo_solo_io.AuthConfig:
+						currentSnapshot.AuthConfigs = append(currentSnapshot.AuthConfigs, typed)
 					default:
 						select {
 						case errs <- fmt.Errorf("ApiSnapshotEmitter "+

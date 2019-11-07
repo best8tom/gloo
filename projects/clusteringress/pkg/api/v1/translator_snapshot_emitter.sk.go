@@ -6,57 +6,92 @@ import (
 	"sync"
 	"time"
 
+	github_com_solo_io_gloo_projects_clusteringress_pkg_api_external_knative "github.com/solo-io/gloo/projects/clusteringress/pkg/api/external/knative"
 	gloo_solo_io "github.com/solo-io/gloo/projects/gloo/pkg/api/v1"
 
 	"go.opencensus.io/stats"
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/tag"
 
-	"github.com/solo-io/go-utils/errutils"
 	"github.com/solo-io/solo-kit/pkg/api/v1/clients"
 	"github.com/solo-io/solo-kit/pkg/errors"
+	skstats "github.com/solo-io/solo-kit/pkg/stats"
+
+	"github.com/solo-io/go-utils/errutils"
 )
 
 var (
-	mTranslatorSnapshotIn  = stats.Int64("translator.clusteringress.gloo.solo.io/snap_emitter/snap_in", "The number of snapshots in", "1")
-	mTranslatorSnapshotOut = stats.Int64("translator.clusteringress.gloo.solo.io/snap_emitter/snap_out", "The number of snapshots out", "1")
+	// Deprecated. See mTranslatorResourcesIn
+	mTranslatorSnapshotIn = stats.Int64("translator.clusteringress.gloo.solo.io/emitter/snap_in", "Deprecated. Use translator.clusteringress.gloo.solo.io/emitter/resources_in. The number of snapshots in", "1")
 
+	// metrics for emitter
+	mTranslatorResourcesIn    = stats.Int64("translator.clusteringress.gloo.solo.io/emitter/resources_in", "The number of resource lists received on open watch channels", "1")
+	mTranslatorSnapshotOut    = stats.Int64("translator.clusteringress.gloo.solo.io/emitter/snap_out", "The number of snapshots out", "1")
+	mTranslatorSnapshotMissed = stats.Int64("translator.clusteringress.gloo.solo.io/emitter/snap_missed", "The number of snapshots missed", "1")
+
+	// views for emitter
+	// deprecated: see translatorResourcesInView
 	translatorsnapshotInView = &view.View{
-		Name:        "translator.clusteringress.gloo.solo.io_snap_emitter/snap_in",
+		Name:        "translator.clusteringress.gloo.solo.io/emitter/snap_in",
 		Measure:     mTranslatorSnapshotIn,
-		Description: "The number of snapshots updates coming in",
+		Description: "Deprecated. Use translator.clusteringress.gloo.solo.io/emitter/resources_in. The number of snapshots updates coming in.",
 		Aggregation: view.Count(),
 		TagKeys:     []tag.Key{},
 	}
+
+	translatorResourcesInView = &view.View{
+		Name:        "translator.clusteringress.gloo.solo.io/emitter/resources_in",
+		Measure:     mTranslatorResourcesIn,
+		Description: "The number of resource lists received on open watch channels",
+		Aggregation: view.Count(),
+		TagKeys: []tag.Key{
+			skstats.NamespaceKey,
+			skstats.ResourceKey,
+		},
+	}
 	translatorsnapshotOutView = &view.View{
-		Name:        "translator.clusteringress.gloo.solo.io/snap_emitter/snap_out",
+		Name:        "translator.clusteringress.gloo.solo.io/emitter/snap_out",
 		Measure:     mTranslatorSnapshotOut,
 		Description: "The number of snapshots updates going out",
+		Aggregation: view.Count(),
+		TagKeys:     []tag.Key{},
+	}
+	translatorsnapshotMissedView = &view.View{
+		Name:        "translator.clusteringress.gloo.solo.io/emitter/snap_missed",
+		Measure:     mTranslatorSnapshotMissed,
+		Description: "The number of snapshots updates going missed. this can happen in heavy load. missed snapshot will be re-tried after a second.",
 		Aggregation: view.Count(),
 		TagKeys:     []tag.Key{},
 	}
 )
 
 func init() {
-	view.Register(translatorsnapshotInView, translatorsnapshotOutView)
+	view.Register(
+		translatorsnapshotInView,
+		translatorsnapshotOutView,
+		translatorsnapshotMissedView,
+		translatorResourcesInView,
+	)
 }
 
-type TranslatorEmitter interface {
-	Register() error
-	Secret() gloo_solo_io.SecretClient
-	Upstream() gloo_solo_io.UpstreamClient
-	ClusterIngress() ClusterIngressClient
+type TranslatorSnapshotEmitter interface {
 	Snapshots(watchNamespaces []string, opts clients.WatchOpts) (<-chan *TranslatorSnapshot, <-chan error, error)
 }
 
-func NewTranslatorEmitter(secretClient gloo_solo_io.SecretClient, upstreamClient gloo_solo_io.UpstreamClient, clusterIngressClient ClusterIngressClient) TranslatorEmitter {
-	return NewTranslatorEmitterWithEmit(secretClient, upstreamClient, clusterIngressClient, make(chan struct{}))
+type TranslatorEmitter interface {
+	TranslatorSnapshotEmitter
+	Register() error
+	Secret() gloo_solo_io.SecretClient
+	ClusterIngress() github_com_solo_io_gloo_projects_clusteringress_pkg_api_external_knative.ClusterIngressClient
 }
 
-func NewTranslatorEmitterWithEmit(secretClient gloo_solo_io.SecretClient, upstreamClient gloo_solo_io.UpstreamClient, clusterIngressClient ClusterIngressClient, emit <-chan struct{}) TranslatorEmitter {
+func NewTranslatorEmitter(secretClient gloo_solo_io.SecretClient, clusterIngressClient github_com_solo_io_gloo_projects_clusteringress_pkg_api_external_knative.ClusterIngressClient) TranslatorEmitter {
+	return NewTranslatorEmitterWithEmit(secretClient, clusterIngressClient, make(chan struct{}))
+}
+
+func NewTranslatorEmitterWithEmit(secretClient gloo_solo_io.SecretClient, clusterIngressClient github_com_solo_io_gloo_projects_clusteringress_pkg_api_external_knative.ClusterIngressClient, emit <-chan struct{}) TranslatorEmitter {
 	return &translatorEmitter{
 		secret:         secretClient,
-		upstream:       upstreamClient,
 		clusterIngress: clusterIngressClient,
 		forceEmit:      emit,
 	}
@@ -65,15 +100,11 @@ func NewTranslatorEmitterWithEmit(secretClient gloo_solo_io.SecretClient, upstre
 type translatorEmitter struct {
 	forceEmit      <-chan struct{}
 	secret         gloo_solo_io.SecretClient
-	upstream       gloo_solo_io.UpstreamClient
-	clusterIngress ClusterIngressClient
+	clusterIngress github_com_solo_io_gloo_projects_clusteringress_pkg_api_external_knative.ClusterIngressClient
 }
 
 func (c *translatorEmitter) Register() error {
 	if err := c.secret.Register(); err != nil {
-		return err
-	}
-	if err := c.upstream.Register(); err != nil {
 		return err
 	}
 	if err := c.clusterIngress.Register(); err != nil {
@@ -86,11 +117,7 @@ func (c *translatorEmitter) Secret() gloo_solo_io.SecretClient {
 	return c.secret
 }
 
-func (c *translatorEmitter) Upstream() gloo_solo_io.UpstreamClient {
-	return c.upstream
-}
-
-func (c *translatorEmitter) ClusterIngress() ClusterIngressClient {
+func (c *translatorEmitter) ClusterIngress() github_com_solo_io_gloo_projects_clusteringress_pkg_api_external_knative.ClusterIngressClient {
 	return c.clusterIngress
 }
 
@@ -116,16 +143,28 @@ func (c *translatorEmitter) Snapshots(watchNamespaces []string, opts clients.Wat
 		namespace string
 	}
 	secretChan := make(chan secretListWithNamespace)
-	/* Create channel for Upstream */
-	type upstreamListWithNamespace struct {
-		list      gloo_solo_io.UpstreamList
+
+	var initialSecretList gloo_solo_io.SecretList
+	/* Create channel for ClusterIngress */
+	type clusterIngressListWithNamespace struct {
+		list      github_com_solo_io_gloo_projects_clusteringress_pkg_api_external_knative.ClusterIngressList
 		namespace string
 	}
-	upstreamChan := make(chan upstreamListWithNamespace)
-	/* Create channel for ClusterIngress */
+	clusterIngressChan := make(chan clusterIngressListWithNamespace)
+
+	var initialClusterIngressList github_com_solo_io_gloo_projects_clusteringress_pkg_api_external_knative.ClusterIngressList
+
+	currentSnapshot := TranslatorSnapshot{}
 
 	for _, namespace := range watchNamespaces {
 		/* Setup namespaced watch for Secret */
+		{
+			secrets, err := c.secret.List(namespace, clients.ListOpts{Ctx: opts.Ctx, Selector: opts.Selector})
+			if err != nil {
+				return nil, nil, errors.Wrapf(err, "initial Secret list")
+			}
+			initialSecretList = append(initialSecretList, secrets...)
+		}
 		secretNamespacesChan, secretErrs, err := c.secret.Watch(namespace, opts)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "starting Secret watch")
@@ -136,16 +175,23 @@ func (c *translatorEmitter) Snapshots(watchNamespaces []string, opts clients.Wat
 			defer done.Done()
 			errutils.AggregateErrs(ctx, errs, secretErrs, namespace+"-secrets")
 		}(namespace)
-		/* Setup namespaced watch for Upstream */
-		upstreamNamespacesChan, upstreamErrs, err := c.upstream.Watch(namespace, opts)
+		/* Setup namespaced watch for ClusterIngress */
+		{
+			clusteringresses, err := c.clusterIngress.List(namespace, clients.ListOpts{Ctx: opts.Ctx, Selector: opts.Selector})
+			if err != nil {
+				return nil, nil, errors.Wrapf(err, "initial ClusterIngress list")
+			}
+			initialClusterIngressList = append(initialClusterIngressList, clusteringresses...)
+		}
+		clusterIngressNamespacesChan, clusterIngressErrs, err := c.clusterIngress.Watch(namespace, opts)
 		if err != nil {
-			return nil, nil, errors.Wrapf(err, "starting Upstream watch")
+			return nil, nil, errors.Wrapf(err, "starting ClusterIngress watch")
 		}
 
 		done.Add(1)
 		go func(namespace string) {
 			defer done.Done()
-			errutils.AggregateErrs(ctx, errs, upstreamErrs, namespace+"-upstreams")
+			errutils.AggregateErrs(ctx, errs, clusterIngressErrs, namespace+"-clusteringresses")
 		}(namespace)
 
 		/* Watch for changes and update snapshot */
@@ -160,45 +206,46 @@ func (c *translatorEmitter) Snapshots(watchNamespaces []string, opts clients.Wat
 						return
 					case secretChan <- secretListWithNamespace{list: secretList, namespace: namespace}:
 					}
-				case upstreamList := <-upstreamNamespacesChan:
+				case clusterIngressList := <-clusterIngressNamespacesChan:
 					select {
 					case <-ctx.Done():
 						return
-					case upstreamChan <- upstreamListWithNamespace{list: upstreamList, namespace: namespace}:
+					case clusterIngressChan <- clusterIngressListWithNamespace{list: clusterIngressList, namespace: namespace}:
 					}
 				}
 			}
 		}(namespace)
 	}
-	/* Setup cluster-wide watch for ClusterIngress */
-
-	clusterIngressChan, clusterIngressErrs, err := c.clusterIngress.Watch(opts)
-	if err != nil {
-		return nil, nil, errors.Wrapf(err, "starting ClusterIngress watch")
-	}
-	done.Add(1)
-	go func() {
-		defer done.Done()
-		errutils.AggregateErrs(ctx, errs, clusterIngressErrs, "clusteringresses")
-	}()
+	/* Initialize snapshot for Secrets */
+	currentSnapshot.Secrets = initialSecretList.Sort()
+	/* Initialize snapshot for Clusteringresses */
+	currentSnapshot.Clusteringresses = initialClusterIngressList.Sort()
 
 	snapshots := make(chan *TranslatorSnapshot)
 	go func() {
-		originalSnapshot := TranslatorSnapshot{}
-		currentSnapshot := originalSnapshot.Clone()
+		// sent initial snapshot to kick off the watch
+		initialSnapshot := currentSnapshot.Clone()
+		snapshots <- &initialSnapshot
+
 		timer := time.NewTicker(time.Second * 1)
+		previousHash := currentSnapshot.Hash()
 		sync := func() {
-			if originalSnapshot.Hash() == currentSnapshot.Hash() {
+			currentHash := currentSnapshot.Hash()
+			if previousHash == currentHash {
 				return
 			}
 
-			stats.Record(ctx, mTranslatorSnapshotOut.M(1))
-			originalSnapshot = currentSnapshot.Clone()
 			sentSnapshot := currentSnapshot.Clone()
-			snapshots <- &sentSnapshot
+			select {
+			case snapshots <- &sentSnapshot:
+				stats.Record(ctx, mTranslatorSnapshotOut.M(1))
+				previousHash = currentHash
+			default:
+				stats.Record(ctx, mTranslatorSnapshotMissed.M(1))
+			}
 		}
 		secretsByNamespace := make(map[string]gloo_solo_io.SecretList)
-		upstreamsByNamespace := make(map[string]gloo_solo_io.UpstreamList)
+		clusteringressesByNamespace := make(map[string]github_com_solo_io_gloo_projects_clusteringress_pkg_api_external_knative.ClusterIngressList)
 
 		for {
 			record := func() { stats.Record(ctx, mTranslatorSnapshotIn.M(1)) }
@@ -219,6 +266,13 @@ func (c *translatorEmitter) Snapshots(watchNamespaces []string, opts clients.Wat
 
 				namespace := secretNamespacedList.namespace
 
+				skstats.IncrementResourceCount(
+					ctx,
+					namespace,
+					"secret",
+					mTranslatorResourcesIn,
+				)
+
 				// merge lists by namespace
 				secretsByNamespace[namespace] = secretNamespacedList.list
 				var secretList gloo_solo_io.SecretList
@@ -226,21 +280,25 @@ func (c *translatorEmitter) Snapshots(watchNamespaces []string, opts clients.Wat
 					secretList = append(secretList, secrets...)
 				}
 				currentSnapshot.Secrets = secretList.Sort()
-			case upstreamNamespacedList := <-upstreamChan:
+			case clusterIngressNamespacedList := <-clusterIngressChan:
 				record()
 
-				namespace := upstreamNamespacedList.namespace
+				namespace := clusterIngressNamespacedList.namespace
+
+				skstats.IncrementResourceCount(
+					ctx,
+					namespace,
+					"cluster_ingress",
+					mTranslatorResourcesIn,
+				)
 
 				// merge lists by namespace
-				upstreamsByNamespace[namespace] = upstreamNamespacedList.list
-				var upstreamList gloo_solo_io.UpstreamList
-				for _, upstreams := range upstreamsByNamespace {
-					upstreamList = append(upstreamList, upstreams...)
+				clusteringressesByNamespace[namespace] = clusterIngressNamespacedList.list
+				var clusterIngressList github_com_solo_io_gloo_projects_clusteringress_pkg_api_external_knative.ClusterIngressList
+				for _, clusteringresses := range clusteringressesByNamespace {
+					clusterIngressList = append(clusterIngressList, clusteringresses...)
 				}
-				currentSnapshot.Upstreams = upstreamList.Sort()
-			case clusterIngressList := <-clusterIngressChan:
-				record()
-				currentSnapshot.Clusteringresses = clusterIngressList
+				currentSnapshot.Clusteringresses = clusterIngressList.Sort()
 			}
 		}
 	}()

@@ -4,7 +4,7 @@ import (
 	"github.com/solo-io/gloo/projects/gloo/cli/pkg/cmd/options"
 	"github.com/solo-io/gloo/projects/gloo/cli/pkg/common"
 	"github.com/solo-io/gloo/projects/gloo/cli/pkg/constants"
-	"github.com/solo-io/gloo/projects/gloo/cli/pkg/helpers"
+	"github.com/solo-io/gloo/projects/gloo/cli/pkg/printers"
 	"github.com/solo-io/go-utils/errors"
 
 	"github.com/spf13/cobra"
@@ -21,7 +21,7 @@ func VirtualService(opts *options.Options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			helpers.PrintVirtualServices(virtualServices, opts.Top.Output)
+			_ = printers.PrintVirtualServices(virtualServices, opts.Top.Output)
 			return nil
 		},
 	}
@@ -34,7 +34,7 @@ func Routes(opts *options.Options) *cobra.Command {
 		Use:     "route",
 		Aliases: []string{"r", "routes"},
 		Short:   "get a list of routes for a given virtual service",
-		Long:    "usage: glooctl get virtualservice route",
+		Long:    "usage: glooctl get virtualservice route [virtual service name]",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var vsName string
 			if len(args) > 0 {
@@ -51,7 +51,7 @@ func Routes(opts *options.Options) *cobra.Command {
 			if err != nil {
 				return errors.Errorf("virtualservice id provided was incorrect")
 			}
-			helpers.PrintRoutes(vs.VirtualHost.Routes, opts.Top.Output)
+			_ = printers.PrintRoutes(vs.VirtualHost.Routes, opts.Top.Output)
 			return nil
 		},
 	}

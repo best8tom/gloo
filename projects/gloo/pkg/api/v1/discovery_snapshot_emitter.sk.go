@@ -6,66 +6,110 @@ import (
 	"sync"
 	"time"
 
+	github_com_solo_io_solo_kit_pkg_api_v1_resources_common_kubernetes "github.com/solo-io/solo-kit/pkg/api/v1/resources/common/kubernetes"
+
 	"go.opencensus.io/stats"
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/tag"
 
-	"github.com/solo-io/go-utils/errutils"
 	"github.com/solo-io/solo-kit/pkg/api/v1/clients"
 	"github.com/solo-io/solo-kit/pkg/errors"
+	skstats "github.com/solo-io/solo-kit/pkg/stats"
+
+	"github.com/solo-io/go-utils/errutils"
 )
 
 var (
-	mDiscoverySnapshotIn  = stats.Int64("discovery.gloo.solo.io/snap_emitter/snap_in", "The number of snapshots in", "1")
-	mDiscoverySnapshotOut = stats.Int64("discovery.gloo.solo.io/snap_emitter/snap_out", "The number of snapshots out", "1")
+	// Deprecated. See mDiscoveryResourcesIn
+	mDiscoverySnapshotIn = stats.Int64("discovery.gloo.solo.io/emitter/snap_in", "Deprecated. Use discovery.gloo.solo.io/emitter/resources_in. The number of snapshots in", "1")
 
+	// metrics for emitter
+	mDiscoveryResourcesIn    = stats.Int64("discovery.gloo.solo.io/emitter/resources_in", "The number of resource lists received on open watch channels", "1")
+	mDiscoverySnapshotOut    = stats.Int64("discovery.gloo.solo.io/emitter/snap_out", "The number of snapshots out", "1")
+	mDiscoverySnapshotMissed = stats.Int64("discovery.gloo.solo.io/emitter/snap_missed", "The number of snapshots missed", "1")
+
+	// views for emitter
+	// deprecated: see discoveryResourcesInView
 	discoverysnapshotInView = &view.View{
-		Name:        "discovery.gloo.solo.io_snap_emitter/snap_in",
+		Name:        "discovery.gloo.solo.io/emitter/snap_in",
 		Measure:     mDiscoverySnapshotIn,
-		Description: "The number of snapshots updates coming in",
+		Description: "Deprecated. Use discovery.gloo.solo.io/emitter/resources_in. The number of snapshots updates coming in.",
 		Aggregation: view.Count(),
 		TagKeys:     []tag.Key{},
 	}
+
+	discoveryResourcesInView = &view.View{
+		Name:        "discovery.gloo.solo.io/emitter/resources_in",
+		Measure:     mDiscoveryResourcesIn,
+		Description: "The number of resource lists received on open watch channels",
+		Aggregation: view.Count(),
+		TagKeys: []tag.Key{
+			skstats.NamespaceKey,
+			skstats.ResourceKey,
+		},
+	}
 	discoverysnapshotOutView = &view.View{
-		Name:        "discovery.gloo.solo.io/snap_emitter/snap_out",
+		Name:        "discovery.gloo.solo.io/emitter/snap_out",
 		Measure:     mDiscoverySnapshotOut,
 		Description: "The number of snapshots updates going out",
+		Aggregation: view.Count(),
+		TagKeys:     []tag.Key{},
+	}
+	discoverysnapshotMissedView = &view.View{
+		Name:        "discovery.gloo.solo.io/emitter/snap_missed",
+		Measure:     mDiscoverySnapshotMissed,
+		Description: "The number of snapshots updates going missed. this can happen in heavy load. missed snapshot will be re-tried after a second.",
 		Aggregation: view.Count(),
 		TagKeys:     []tag.Key{},
 	}
 )
 
 func init() {
-	view.Register(discoverysnapshotInView, discoverysnapshotOutView)
+	view.Register(
+		discoverysnapshotInView,
+		discoverysnapshotOutView,
+		discoverysnapshotMissedView,
+		discoveryResourcesInView,
+	)
 }
 
-type DiscoveryEmitter interface {
-	Register() error
-	Upstream() UpstreamClient
-	Secret() SecretClient
+type DiscoverySnapshotEmitter interface {
 	Snapshots(watchNamespaces []string, opts clients.WatchOpts) (<-chan *DiscoverySnapshot, <-chan error, error)
 }
 
-func NewDiscoveryEmitter(upstreamClient UpstreamClient, secretClient SecretClient) DiscoveryEmitter {
-	return NewDiscoveryEmitterWithEmit(upstreamClient, secretClient, make(chan struct{}))
+type DiscoveryEmitter interface {
+	DiscoverySnapshotEmitter
+	Register() error
+	Upstream() UpstreamClient
+	KubeNamespace() github_com_solo_io_solo_kit_pkg_api_v1_resources_common_kubernetes.KubeNamespaceClient
+	Secret() SecretClient
 }
 
-func NewDiscoveryEmitterWithEmit(upstreamClient UpstreamClient, secretClient SecretClient, emit <-chan struct{}) DiscoveryEmitter {
+func NewDiscoveryEmitter(upstreamClient UpstreamClient, kubeNamespaceClient github_com_solo_io_solo_kit_pkg_api_v1_resources_common_kubernetes.KubeNamespaceClient, secretClient SecretClient) DiscoveryEmitter {
+	return NewDiscoveryEmitterWithEmit(upstreamClient, kubeNamespaceClient, secretClient, make(chan struct{}))
+}
+
+func NewDiscoveryEmitterWithEmit(upstreamClient UpstreamClient, kubeNamespaceClient github_com_solo_io_solo_kit_pkg_api_v1_resources_common_kubernetes.KubeNamespaceClient, secretClient SecretClient, emit <-chan struct{}) DiscoveryEmitter {
 	return &discoveryEmitter{
-		upstream:  upstreamClient,
-		secret:    secretClient,
-		forceEmit: emit,
+		upstream:      upstreamClient,
+		kubeNamespace: kubeNamespaceClient,
+		secret:        secretClient,
+		forceEmit:     emit,
 	}
 }
 
 type discoveryEmitter struct {
-	forceEmit <-chan struct{}
-	upstream  UpstreamClient
-	secret    SecretClient
+	forceEmit     <-chan struct{}
+	upstream      UpstreamClient
+	kubeNamespace github_com_solo_io_solo_kit_pkg_api_v1_resources_common_kubernetes.KubeNamespaceClient
+	secret        SecretClient
 }
 
 func (c *discoveryEmitter) Register() error {
 	if err := c.upstream.Register(); err != nil {
+		return err
+	}
+	if err := c.kubeNamespace.Register(); err != nil {
 		return err
 	}
 	if err := c.secret.Register(); err != nil {
@@ -76,6 +120,10 @@ func (c *discoveryEmitter) Register() error {
 
 func (c *discoveryEmitter) Upstream() UpstreamClient {
 	return c.upstream
+}
+
+func (c *discoveryEmitter) KubeNamespace() github_com_solo_io_solo_kit_pkg_api_v1_resources_common_kubernetes.KubeNamespaceClient {
+	return c.kubeNamespace
 }
 
 func (c *discoveryEmitter) Secret() SecretClient {
@@ -104,6 +152,9 @@ func (c *discoveryEmitter) Snapshots(watchNamespaces []string, opts clients.Watc
 		namespace string
 	}
 	upstreamChan := make(chan upstreamListWithNamespace)
+
+	var initialUpstreamList UpstreamList
+	/* Create channel for KubeNamespace */
 	/* Create channel for Secret */
 	type secretListWithNamespace struct {
 		list      SecretList
@@ -111,8 +162,19 @@ func (c *discoveryEmitter) Snapshots(watchNamespaces []string, opts clients.Watc
 	}
 	secretChan := make(chan secretListWithNamespace)
 
+	var initialSecretList SecretList
+
+	currentSnapshot := DiscoverySnapshot{}
+
 	for _, namespace := range watchNamespaces {
 		/* Setup namespaced watch for Upstream */
+		{
+			upstreams, err := c.upstream.List(namespace, clients.ListOpts{Ctx: opts.Ctx, Selector: opts.Selector})
+			if err != nil {
+				return nil, nil, errors.Wrapf(err, "initial Upstream list")
+			}
+			initialUpstreamList = append(initialUpstreamList, upstreams...)
+		}
 		upstreamNamespacesChan, upstreamErrs, err := c.upstream.Watch(namespace, opts)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "starting Upstream watch")
@@ -124,6 +186,13 @@ func (c *discoveryEmitter) Snapshots(watchNamespaces []string, opts clients.Watc
 			errutils.AggregateErrs(ctx, errs, upstreamErrs, namespace+"-upstreams")
 		}(namespace)
 		/* Setup namespaced watch for Secret */
+		{
+			secrets, err := c.secret.List(namespace, clients.ListOpts{Ctx: opts.Ctx, Selector: opts.Selector})
+			if err != nil {
+				return nil, nil, errors.Wrapf(err, "initial Secret list")
+			}
+			initialSecretList = append(initialSecretList, secrets...)
+		}
 		secretNamespacesChan, secretErrs, err := c.secret.Watch(namespace, opts)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "starting Secret watch")
@@ -157,21 +226,48 @@ func (c *discoveryEmitter) Snapshots(watchNamespaces []string, opts clients.Watc
 			}
 		}(namespace)
 	}
+	/* Initialize snapshot for Upstreams */
+	currentSnapshot.Upstreams = initialUpstreamList.Sort()
+	/* Setup cluster-wide watch for KubeNamespace */
+	var err error
+	currentSnapshot.Kubenamespaces, err = c.kubeNamespace.List(clients.ListOpts{Ctx: opts.Ctx, Selector: opts.Selector})
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "initial KubeNamespace list")
+	}
+	kubeNamespaceChan, kubeNamespaceErrs, err := c.kubeNamespace.Watch(opts)
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "starting KubeNamespace watch")
+	}
+	done.Add(1)
+	go func() {
+		defer done.Done()
+		errutils.AggregateErrs(ctx, errs, kubeNamespaceErrs, "kubenamespaces")
+	}()
+	/* Initialize snapshot for Secrets */
+	currentSnapshot.Secrets = initialSecretList.Sort()
 
 	snapshots := make(chan *DiscoverySnapshot)
 	go func() {
-		originalSnapshot := DiscoverySnapshot{}
-		currentSnapshot := originalSnapshot.Clone()
+		// sent initial snapshot to kick off the watch
+		initialSnapshot := currentSnapshot.Clone()
+		snapshots <- &initialSnapshot
+
 		timer := time.NewTicker(time.Second * 1)
+		previousHash := currentSnapshot.Hash()
 		sync := func() {
-			if originalSnapshot.Hash() == currentSnapshot.Hash() {
+			currentHash := currentSnapshot.Hash()
+			if previousHash == currentHash {
 				return
 			}
 
-			stats.Record(ctx, mDiscoverySnapshotOut.M(1))
-			originalSnapshot = currentSnapshot.Clone()
 			sentSnapshot := currentSnapshot.Clone()
-			snapshots <- &sentSnapshot
+			select {
+			case snapshots <- &sentSnapshot:
+				stats.Record(ctx, mDiscoverySnapshotOut.M(1))
+				previousHash = currentHash
+			default:
+				stats.Record(ctx, mDiscoverySnapshotMissed.M(1))
+			}
 		}
 		upstreamsByNamespace := make(map[string]UpstreamList)
 		secretsByNamespace := make(map[string]SecretList)
@@ -195,6 +291,13 @@ func (c *discoveryEmitter) Snapshots(watchNamespaces []string, opts clients.Watc
 
 				namespace := upstreamNamespacedList.namespace
 
+				skstats.IncrementResourceCount(
+					ctx,
+					namespace,
+					"upstream",
+					mDiscoveryResourcesIn,
+				)
+
 				// merge lists by namespace
 				upstreamsByNamespace[namespace] = upstreamNamespacedList.list
 				var upstreamList UpstreamList
@@ -202,10 +305,28 @@ func (c *discoveryEmitter) Snapshots(watchNamespaces []string, opts clients.Watc
 					upstreamList = append(upstreamList, upstreams...)
 				}
 				currentSnapshot.Upstreams = upstreamList.Sort()
+			case kubeNamespaceList := <-kubeNamespaceChan:
+				record()
+
+				skstats.IncrementResourceCount(
+					ctx,
+					"<all>",
+					"kube_namespace",
+					mDiscoveryResourcesIn,
+				)
+
+				currentSnapshot.Kubenamespaces = kubeNamespaceList
 			case secretNamespacedList := <-secretChan:
 				record()
 
 				namespace := secretNamespacedList.namespace
+
+				skstats.IncrementResourceCount(
+					ctx,
+					namespace,
+					"secret",
+					mDiscoveryResourcesIn,
+				)
 
 				// merge lists by namespace
 				secretsByNamespace[namespace] = secretNamespacedList.list

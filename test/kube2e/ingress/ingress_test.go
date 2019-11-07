@@ -39,15 +39,8 @@ var _ = Describe("Kube2e: Ingress", func() {
 			},
 			Spec: v1beta1.IngressSpec{
 				Backend: backend,
-				//TLS: []v1beta1.IngressTLS{
-				//	{
-				//		Hosts:      []string{"some.host"},
-				//		SecretName: "doesntexistanyway",
-				//	},
-				//},
 				Rules: []v1beta1.IngressRule{
 					{
-						//Host: "some.host",
 						IngressRuleValue: v1beta1.IngressRuleValue{
 							HTTP: &v1beta1.HTTPIngressRuleValue{
 								Paths: []v1beta1.HTTPIngressPath{
@@ -73,7 +66,7 @@ var _ = Describe("Kube2e: Ingress", func() {
 			Host:              ingressProxy,
 			Service:           ingressProxy,
 			Port:              ingressPort,
-			ConnectionTimeout: 10,
-		}, helper.SimpleHttpResponse, 1, time.Minute*2)
+			ConnectionTimeout: 1,
+		}, helper.SimpleHttpResponse, 1, time.Minute*2, 1*time.Second)
 	})
 })
